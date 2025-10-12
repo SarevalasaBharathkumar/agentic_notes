@@ -219,9 +219,9 @@ export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNo
                 className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-[70%] rounded-lg p-3 text-sm ${message.sender === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted/50"
+                  className={`w-full rounded-md p-3 text-sm border ${message.sender === "user"
+                    ? "bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-100 border-blue-200 dark:border-blue-900 text-right"
+                    : "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900 text-left"
                   }`}
                 >
                   {message.text}
@@ -266,7 +266,7 @@ export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNo
                             <Button
                               variant="default"
                               size="sm"
-                              className="gap-2 h-8 px-3"
+                              className="gap-1 h-7 px-2 text-xs"
                               onClick={() => handleAcceptSuggestedNote(message.suggestedNote!)}
                             >
                               <NotebookPen className="h-4 w-4" />
@@ -362,7 +362,7 @@ export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNo
             ))}
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-muted/50 rounded-lg p-3 text-sm animate-pulse">
+                <div className="w-full border rounded-md p-3 text-sm animate-pulse bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900 text-left">
                   AI is thinking...
                 </div>
               </div>

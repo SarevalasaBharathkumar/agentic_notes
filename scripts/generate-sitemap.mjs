@@ -10,20 +10,28 @@ function ensureDir(dir) {
 
 function getSiteUrl() {
   const env = process.env;
-  let url = env.VITE_SITE_URL || env.SITE_URL || (env.VERCEL_URL ? `https://${env.VERCEL_URL}` : 'https://example.com');
+  let url = env.VITE_SITE_URL || env.SITE_URL || (env.VERCEL_URL ? `https://${env.VERCEL_URL}` : 'https://agentic-notes.vercel.app');
   if (!url.startsWith('http')) url = `https://${url}`;
   if (url.endsWith('/')) url = url.slice(0, -1);
   return url;
 }
 
 function writeSitemap(siteUrl) {
+  const paths = ['/', '/about', '/features', '/blog', '/privacy-policy'];
+  const today = new Date().toISOString().split('T')[0];
+  const urlset = paths
+    .map(p => (
+`  <url>
+    <loc>${siteUrl}${p}</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>${p === '/' ? '1.0' : '0.8'}</priority>
+  </url>`
+  )).join('\n');
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n` +
   `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-  `  <url>\n` +
-  `    <loc>${siteUrl}/</loc>\n` +
-  `    <changefreq>weekly</changefreq>\n` +
-  `    <priority>0.8</priority>\n` +
-  `  </url>\n` +
+  `${urlset}\n` +
   `</urlset>\n`;
   fs.writeFileSync(path.join(pubDir, 'sitemap.xml'), xml, 'utf8');
   console.log('Wrote public/sitemap.xml');
@@ -48,4 +56,3 @@ ensureDir(pubDir);
 const siteUrl = getSiteUrl();
 writeSitemap(siteUrl);
 upsertRobots(siteUrl);
-

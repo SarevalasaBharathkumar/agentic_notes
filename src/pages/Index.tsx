@@ -459,7 +459,7 @@ const Index = () => {
       </AlertDialog>
 
       {/* Floating Action Buttons */}
-      <div className="fixed bottom-6 right-6 flex flex-col gap-4">
+      <div className="fixed bottom-6 right-6 flex flex-col gap-4 z-50">
         <Button
           className="rounded-full w-12 h-12 shadow-glow bg-gradient-primary p-0"
           onClick={() => {
