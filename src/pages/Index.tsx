@@ -39,9 +39,8 @@ const Index = () => {
   const [selectedNote, setSelectedNote] = useState<Note | undefined>();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | undefined>();
-  // Danger zone: delete all notes
-  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
-  const [accountDeleting, setAccountDeleting] = useState(false);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
   const { toast } = useToast();
   
   // Track if we pushed a history entry for dialogs
@@ -283,45 +282,31 @@ const Index = () => {
     }
   };
 
-  // Danger Zone: delete all notes (no account deletion)
-  const confirmDeleteAccount = async () => {
+  const confirmDeleteAll = async () => {
     if (!session?.user?.id) return;
+    setDeletingAll(true);
     try {
-      setAccountDeleting(true);
-      // Print user details in console for audit
-      const { data: { user } } = await supabase.auth.getUser();
-      // Minimal details to avoid leaking sensitive info
-      console.info("[Danger Zone] Delete all notes requested by:", {
-        id: user?.id,
-        email: user?.email,
-        created_at: (user as any)?.created_at,
-      });
-      // Invoke server-side function to delete all notes
-      const { data, error } = await supabase.functions.invoke('delete-account', {
-        body: {},
-      });
-      if (error) {
-        throw error;
-      }
-      console.info('[Danger Zone] delete-account response:', data);
+      const { error } = await supabase
+        .from("notes")
+        .delete()
+        .eq("user_id", session.user.id);
+      if (error) throw error;
 
-      // Clear local state
       setNotes([]);
-
       toast({
         title: "All notes deleted",
-        description: "All your notes have been permanently deleted.",
+        description: "All your notes have been permanently removed.",
       });
-    } catch (e) {
-      console.error("Error deleting notes:", e);
+    } catch (error) {
+      console.error("Error deleting all notes:", error);
       toast({
         title: "Error",
-        description: "Failed to delete notes. Please try again.",
+        description: "Failed to delete all notes. Please try again.",
         variant: "destructive",
       });
     } finally {
-      setAccountDeleting(false);
-      setDeleteAccountOpen(false);
+      setDeletingAll(false);
+      setDeleteAllOpen(false);
     }
   };
 
@@ -412,6 +397,23 @@ const Index = () => {
         />
         
       </div>
+      
+      {/* Danger Zone: Delete All Notes */}
+      <div className="max-w-6xl mx-auto mt-12">
+        <div className="border border-destructive/30 rounded-lg p-4 bg-destructive/5">
+          <h3 className="font-semibold text-destructive mb-1">Danger Zone</h3>
+          <p className="text-sm text-muted-foreground mb-3">
+            Permanently delete all your notes. This action cannot be undone.
+          </p>
+          <Button
+            variant="destructive"
+            onClick={() => setDeleteAllOpen(true)}
+            disabled={notes.length === 0 || deletingAll}
+          >
+            {deletingAll ? "Deleting..." : "Delete all my notes"}
+          </Button>
+        </div>
+      </div>
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
@@ -429,6 +431,28 @@ const Index = () => {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete All Confirmation Dialog */}
+      <AlertDialog open={deleteAllOpen} onOpenChange={setDeleteAllOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete all notes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete all your notes. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingAll}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteAll}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deletingAll}
+            >
+              {deletingAll ? "Deleting..." : "Delete all"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -550,42 +574,7 @@ const Index = () => {
         }}
       />
 
-      {/* Danger Zone */}
-      <div className="mt-12 border border-destructive/40 rounded-lg p-4 bg-destructive/5">
-        <h3 className="text-lg font-semibold text-destructive mb-2">Danger Zone</h3>
-        <p className="text-sm text-muted-foreground mb-4">
-          This will permanently delete all of your notes. This action cannot be undone.
-        </p>
-        <Button
-          variant="destructive"
-          onClick={() => setDeleteAccountOpen(true)}
-          disabled={!session?.user?.id}
-        >
-          Delete All Notes
-        </Button>
-      </div>
-
-      {/* Confirm Delete All Notes */}
-      <AlertDialog open={deleteAccountOpen} onOpenChange={setDeleteAccountOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete all notes?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete all of your notes. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={accountDeleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={confirmDeleteAccount}
-              disabled={accountDeleting}
-            >
-              {accountDeleting ? "Deleting..." : "Yes, delete all notes"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      
     </Layout>
   );
 };

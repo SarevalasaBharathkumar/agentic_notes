@@ -11,5 +11,5 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts", "./**/*.d.ts"]
 }
