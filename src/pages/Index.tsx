@@ -1,0 +1,511 @@
+import { useEffect, useRef, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { Auth } from "@/components/Auth";
+import { MessageSquare, Plus } from "lucide-react";
+import { generateTitle } from "@/lib/gemini";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+import { Layout } from "@/components/Layout";
+import { NotesGrid } from "@/components/NotesGrid";
+import { Loading } from "@/components/Loading";
+import { ChatDialog } from "@/components/ChatDialog";
+import { NoteDialog } from "@/components/NoteDialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+interface Note {
+  id: string;
+  title: string;
+  content: string;
+  updated_at: string;
+  user_id: string;
+  tags?: string[] | null;
+}
+
+const Index = () => {
+  const [session, setSession] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [noteDialogOpen, setNoteDialogOpen] = useState(false);
+  const [selectedNote, setSelectedNote] = useState<Note | undefined>();
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [noteToDelete, setNoteToDelete] = useState<Note | undefined>();
+  const { toast } = useToast();
+  
+  // Track if we pushed a history entry for dialogs
+  const pushedChatRef = useRef(false);
+  const pushedNoteRef = useRef(false);
+
+  const pushQueryParam = (key: string, value: string) => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set(key, value);
+      window.history.pushState({ modal: key, value }, "", url.toString());
+    } catch {}
+  };
+
+  const removeQueryParam = (key: string) => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete(key);
+      window.history.replaceState({}, "", url.toString());
+    } catch {}
+  };
+
+  // Handle browser back/forward to close dialogs instead of leaving app
+  useEffect(() => {
+    const onPop = () => {
+      const sp = new URLSearchParams(window.location.search);
+      const chatParam = sp.get("chat");
+      const noteParam = sp.get("note");
+      if (!chatParam && chatOpen) {
+        setChatOpen(false);
+        pushedChatRef.current = false;
+      }
+      if (!noteParam && noteDialogOpen) {
+        setNoteDialogOpen(false);
+        setSelectedNote(undefined);
+        pushedNoteRef.current = false;
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [chatOpen, noteDialogOpen]);
+  
+  const handleCreateNoteFromChat = async (note: { title: string; content: string }) => {
+    if (!session?.user?.id) return;
+    try {
+      const { data, error } = await supabase
+        .from("notes")
+        .insert({
+          title: note.title,
+          content: note.content,
+          user_id: session.user.id,
+        })
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      // Prepend newly created note to the list
+      setNotes((prev) => [data as Note, ...prev]);
+      toast({ title: "Note saved", description: `Added "${note.title}" from assistant.` });
+    } catch (e) {
+      console.error("Error creating note from chat:", e);
+      toast({ title: "Error", description: "Failed to save note.", variant: "destructive" });
+    }
+  };
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch notes when session changes
+  useEffect(() => {
+    if (session?.user?.id) {
+      const fetchNotes = async () => {
+        const { data, error } = await supabase
+          .from("notes")
+          .select("*")
+          .eq("user_id", session.user.id)
+          .order("updated_at", { ascending: false });
+
+        if (error) {
+          console.error("Error fetching notes:", error);
+          return;
+        }
+
+        const stripHtml = (s: string) => (s || "").replace(/<[^>]*>/g, " ").trim();
+        const filtered = (data || []).filter(n => (n.title && n.title.trim()) || stripHtml(n.content));
+        const sorted = (filtered as Note[]).slice().sort((a, b) => {
+          const ap = (a.tags || []).includes('pinned') ? 1 : 0;
+          const bp = (b.tags || []).includes('pinned') ? 1 : 0;
+          if (ap !== bp) return bp - ap; // pinned first
+          const ta = new Date(a.updated_at || 0).getTime();
+          const tb = new Date(b.updated_at || 0).getTime();
+          return tb - ta;
+        });
+        setNotes(sorted);
+      };
+
+      fetchNotes();
+
+      // Subscribe to realtime changes
+      const subscription = supabase
+        .channel("notes_channel")
+        .on(
+          "postgres_changes",
+          {
+            event: "DELETE",
+            schema: "public",
+            table: "notes",
+            filter: `user_id=eq.${session.user.id}`,
+          },
+          (payload) => {
+            // Remove the deleted note from state
+            setNotes(currentNotes => currentNotes.filter(note => note.id !== payload.old.id));
+          }
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notes",
+            filter: `user_id=eq.${session.user.id}`,
+          },
+          () => {
+            // Fetch all notes for new insertions
+            fetchNotes();
+          }
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "notes",
+            filter: `user_id=eq.${session.user.id}`,
+          },
+          (payload) => {
+            // Update the modified note in state and maintain sort (pinned first, then updated_at desc)
+            setNotes(currentNotes => {
+              const next = currentNotes.map(note => note.id === (payload.new as any).id ? (payload.new as Note) : note);
+              return next.slice().sort((a, b) => {
+                const ap = (a.tags || []).includes('pinned') ? 1 : 0;
+                const bp = (b.tags || []).includes('pinned') ? 1 : 0;
+                if (ap !== bp) return bp - ap;
+                const ta = new Date(a.updated_at || 0).getTime();
+                const tb = new Date(b.updated_at || 0).getTime();
+                return tb - ta;
+              });
+            });
+          }
+        )
+        .subscribe();
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    }
+  }, [session]);
+
+  const handleDeleteNote = async (note: Note) => {
+    setNoteToDelete(note);
+    setDeleteDialogOpen(true);
+  };
+
+  const togglePin = async (note: Note) => {
+    const currentTags = note.tags || [];
+    const isPinned = currentTags.includes('pinned');
+    const nextTags = isPinned ? currentTags.filter(t => t !== 'pinned') : [...currentTags, 'pinned'];
+
+    // Optimistic UI update
+    setNotes(curr => curr.map(n => n.id === note.id ? { ...n, tags: nextTags } : n)
+      .slice().sort((a, b) => {
+        const ap = (a.tags || []).includes('pinned') ? 1 : 0;
+        const bp = (b.tags || []).includes('pinned') ? 1 : 0;
+        if (ap !== bp) return bp - ap;
+        const ta = new Date(a.updated_at || 0).getTime();
+        const tb = new Date(b.updated_at || 0).getTime();
+        return tb - ta;
+      })
+    );
+
+    // Persist to Supabase using tags column
+    try {
+      const { error } = await supabase
+        .from("notes")
+        .update({ tags: nextTags })
+        .eq("id", note.id);
+      if (error) throw error;
+    } catch (e) {
+      // Revert on error
+      setNotes(curr => curr.map(n => n.id === note.id ? note : n));
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!noteToDelete) return;
+    
+    try {
+      // If the note is an optimistic temp note, remove locally without hitting Supabase
+      if (noteToDelete.id === 'temp') {
+        setNotes(currentNotes => currentNotes.filter(note => note.id !== 'temp'));
+        toast({ title: "Note removed", description: "Unsaved note draft was discarded." });
+        return;
+      }
+      const { error } = await supabase
+        .from("notes")
+        .delete()
+        .eq("id", noteToDelete.id);
+
+      if (error) throw error;
+      
+      // Immediately update the UI by removing the deleted note
+      setNotes(currentNotes => currentNotes.filter(note => note.id !== noteToDelete.id));
+      
+      toast({
+        title: "Note deleted",
+        description: "Your note has been permanently deleted.",
+      });
+    } catch (error) {
+      console.error("Error deleting note:", error);
+      toast({
+        title: "Error",
+        description: "Failed to delete note. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setDeleteDialogOpen(false);
+      setNoteToDelete(undefined);
+    }
+  };
+
+  const handleSuggestTitle = async (note: Note) => {
+    if (!note.content) return;
+    
+    try {
+      const title = await generateTitle(note.content);
+      
+      // Update local state immediately
+      setNotes(currentNotes => 
+        currentNotes.map(n => 
+          n.id === note.id ? { ...n, title } : n
+        )
+      );
+
+      const { error } = await supabase
+        .from("notes")
+        .update({ title })
+        .eq("id", note.id);
+
+      if (error) {
+        // Revert changes if update fails
+        setNotes(currentNotes => 
+          currentNotes.map(n => 
+            n.id === note.id ? note : n
+          )
+        );
+        throw error;
+      }
+
+      toast({
+        title: "Title updated",
+        description: "AI has suggested a new title for your note.",
+      });
+    } catch (error) {
+      console.error("Error suggesting title:", error);
+      toast({
+        title: "Error",
+        description: "Failed to generate title suggestion. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  if (loading) {
+    return <Loading />;
+  }
+
+  if (!session) {
+    return <Auth />;
+  }
+
+  return (
+    <Layout>
+      <div className="max-w-6xl mx-auto">
+        <h2 className="text-2xl font-bold mb-6">Your Notes</h2>
+        <NotesGrid 
+          notes={notes.map(note => ({
+            id: note.id,
+            title: note.title || "Untitled Note",
+            content: note.content,
+            updatedAt: note.updated_at,
+            pinned: (note.tags || []).includes('pinned'),
+          }))} 
+          onNoteClick={(note) => {
+            const fullNote = notes.find(n => n.id === note.id);
+            if (fullNote) {
+              // Push URL state so back button closes dialog
+              pushQueryParam("note", fullNote.id);
+              pushedNoteRef.current = true;
+              setSelectedNote(fullNote);
+              setNoteDialogOpen(true);
+            }
+          }}
+          onDeleteNote={(note) => {
+            const fullNote = notes.find(n => n.id === note.id);
+            if (fullNote) handleDeleteNote(fullNote);
+          }}
+          onSuggestTitle={(note) => {
+            const fullNote = notes.find(n => n.id === note.id);
+            if (fullNote) handleSuggestTitle(fullNote);
+          }}
+          onTogglePin={(note) => {
+            const fullNote = notes.find(n => n.id === note.id);
+            if (fullNote) togglePin(fullNote);
+          }}
+        />
+        
+      </div>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete your note. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Floating Action Buttons */}
+      <div className="fixed bottom-6 right-6 flex flex-col gap-4">
+        <Button
+          className="rounded-full w-12 h-12 shadow-glow bg-gradient-primary p-0"
+          onClick={() => {
+            // Open a new/blank editor and push a history entry
+            // so the mobile back button closes the editor first.
+            setSelectedNote(undefined);
+            if (!pushedNoteRef.current) {
+              pushQueryParam("note", "new");
+              pushedNoteRef.current = true;
+            }
+            setNoteDialogOpen(true);
+          }}
+        >
+          <Plus className="h-6 w-6 text-primary-foreground" />
+        </Button>
+        <Button
+          className="rounded-full w-12 h-12 shadow-glow bg-gradient-primary p-0"
+          onClick={() => {
+            pushQueryParam("chat", "1");
+            pushedChatRef.current = true;
+            setChatOpen(true);
+          }}
+        >
+          <MessageSquare className="h-6 w-6 text-primary-foreground" />
+        </Button>
+      </div>
+
+      <ChatDialog
+        open={chatOpen}
+        onOpenChange={(isOpen) => {
+          if (isOpen) {
+            if (!pushedChatRef.current) {
+              pushQueryParam("chat", "1");
+              pushedChatRef.current = true;
+            }
+            setChatOpen(true);
+          } else {
+            setChatOpen(false);
+            if (pushedChatRef.current) {
+              pushedChatRef.current = false;
+              // Pop the history entry
+              window.history.back();
+            } else {
+              removeQueryParam("chat");
+            }
+          }
+        }}
+        notes={notes.map(n => ({ id: n.id, title: n.title || "Untitled Note", content: n.content || "" }))}
+        onNewNote={handleCreateNoteFromChat}
+        onOpenNote={(noteId) => {
+          const fullNote = notes.find(n => n.id === noteId);
+          if (fullNote) {
+            pushQueryParam("note", fullNote.id);
+            pushedNoteRef.current = true;
+            setSelectedNote(fullNote);
+            setNoteDialogOpen(true);
+          }
+        }}
+      />
+
+      <NoteDialog
+        note={selectedNote}
+        open={noteDialogOpen}
+        onOpenChange={(isOpen) => {
+          if (isOpen) {
+            if (!pushedNoteRef.current) {
+              // For existing notes, use their id; for new notes, mark as "new".
+              const value = selectedNote?.id ?? "new";
+              pushQueryParam("note", value);
+              pushedNoteRef.current = true;
+            }
+            setNoteDialogOpen(true);
+          } else {
+            setNoteDialogOpen(false);
+            setSelectedNote(undefined);
+            if (pushedNoteRef.current) {
+              pushedNoteRef.current = false;
+              window.history.back();
+            } else {
+              removeQueryParam("note");
+            }
+          }
+        }}
+        onUpdateNote={(updatedNote) => {
+          if (!updatedNote) {
+            // Note creation failed or was cancelled
+            setNotes(currentNotes => currentNotes.filter(n => n.id !== 'temp'));
+            return;
+          }
+          
+          setNotes(currentNotes => {
+            // If flagged as temp, just prepend
+            if (updatedNote.id === 'temp') {
+              return [updatedNote as Note, ...currentNotes];
+            }
+            // Check if it already exists
+            const exists = currentNotes.some(n => n.id === updatedNote.id);
+            let next = exists
+              ? currentNotes.map(note => note.id === updatedNote.id ? { ...note, ...updatedNote } as Note : note)
+              : [updatedNote as Note, ...currentNotes];
+            // Keep the UI order pinned first, then updated_at desc
+            next = next.slice().sort((a, b) => {
+              const ap = (a.tags || []).includes('pinned') ? 1 : 0;
+              const bp = (b.tags || []).includes('pinned') ? 1 : 0;
+              if (ap !== bp) return bp - ap;
+              const ta = new Date(a.updated_at || 0).getTime();
+              const tb = new Date(b.updated_at || 0).getTime();
+              return tb - ta;
+            });
+            return next;
+          });
+        }}
+      />
+    </Layout>
+  );
+};
+
+export default Index;

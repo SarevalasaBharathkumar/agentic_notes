@@ -1,0 +1,10 @@
+project_id = "xlwchofinqnsnozzqbns"
+
+[functions.generate-embeddings]
+verify_jwt = true
+
+[functions.chat]
+verify_jwt = true
+
+[functions.generate-clusters]
+verify_jwt = true
