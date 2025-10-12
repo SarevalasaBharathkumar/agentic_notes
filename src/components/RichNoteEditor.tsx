@@ -10,7 +10,7 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { Button } from "@/components/ui/button";
 import { Bold, Italic, Underline as UnderlineIcon, List, ListOrdered, CheckSquare, Table2, Link as LinkIcon, Heading1, Heading2, Heading3, Undo2, Redo2, Rows, Columns, Trash2 } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+// Popover not used for table tools anymore (replaced with centered dialog)
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { transformMarkdownToHtml } from "@/components/MarkdownRenderer";
@@ -73,6 +73,8 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkText, setLinkText] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
+  // Centered table tools dialog
+  const [tableOpen, setTableOpen] = useState(false);
 
   useEffect(() => {
     if (!editor) return;
@@ -167,23 +169,9 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
 
         {/* Removed explicit "+" add button for checklist per request */}
 
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button type="button" variant="outline" size="icon" aria-label="Table">
-              <Table2 className="h-4 w-4" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-auto">
-            <TableSizePicker onPick={(r, c) => editor.chain().focus().insertTable({ rows: r, cols: c, withHeaderRow: true }).run()} />
-            <div className="mt-2 flex flex-wrap gap-1">
-              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().addRowAfter().run()}><Rows className="h-4 w-4 mr-1"/>Row+</Button>
-              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().addColumnAfter().run()}><Columns className="h-4 w-4 mr-1"/>Col+</Button>
-              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().deleteRow().run()}><Rows className="h-4 w-4 mr-1"/>Del Row</Button>
-              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().deleteColumn().run()}><Columns className="h-4 w-4 mr-1"/>Del Col</Button>
-              <Button type="button" variant="destructive" size="sm" onClick={() => editor.chain().focus().deleteTable().run()}><Trash2 className="h-4 w-4 mr-1"/>Del</Button>
-            </div>
-          </PopoverContent>
-        </Popover>
+        <Button type="button" variant="outline" size="icon" aria-label="Table" onClick={() => setTableOpen(true)}>
+          <Table2 className="h-4 w-4" />
+        </Button>
         {/* Removed inline code (markdown) button per request */}
         <Button
           type="button"
@@ -249,6 +237,34 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
             >
               Insert
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* Centered Table Tools Dialog */}
+      <Dialog open={tableOpen} onOpenChange={setTableOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Table Tools</DialogTitle>
+            <DialogDescription className="sr-only">Insert a table or modify its structure.</DialogDescription>
+          </DialogHeader>
+          <div>
+            <div className="text-sm font-medium mb-2">Insert table</div>
+            <TableSizePicker
+              onPick={(r, c) => {
+                editor.chain().focus().insertTable({ rows: r, cols: c, withHeaderRow: true }).run();
+                setTableOpen(false);
+              }}
+            />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().addRowAfter().run()}><Rows className="h-4 w-4 mr-1"/>Row+</Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().addColumnAfter().run()}><Columns className="h-4 w-4 mr-1"/>Col+</Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().deleteRow().run()}><Rows className="h-4 w-4 mr-1"/>Del Row</Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => editor.chain().focus().deleteColumn().run()}><Columns className="h-4 w-4 mr-1"/>Del Col</Button>
+              <Button type="button" variant="destructive" size="sm" onClick={() => { editor.chain().focus().deleteTable().run(); setTableOpen(false); }}><Trash2 className="h-4 w-4 mr-1"/>Del</Button>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setTableOpen(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

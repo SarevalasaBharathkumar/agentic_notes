@@ -39,6 +39,9 @@ const Index = () => {
   const [selectedNote, setSelectedNote] = useState<Note | undefined>();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | undefined>();
+  // Danger zone: delete all notes
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
+  const [accountDeleting, setAccountDeleting] = useState(false);
   const { toast } = useToast();
   
   // Track if we pushed a history entry for dialogs
@@ -280,6 +283,48 @@ const Index = () => {
     }
   };
 
+  // Danger Zone: delete all notes (no account deletion)
+  const confirmDeleteAccount = async () => {
+    if (!session?.user?.id) return;
+    try {
+      setAccountDeleting(true);
+      // Print user details in console for audit
+      const { data: { user } } = await supabase.auth.getUser();
+      // Minimal details to avoid leaking sensitive info
+      console.info("[Danger Zone] Delete all notes requested by:", {
+        id: user?.id,
+        email: user?.email,
+        created_at: (user as any)?.created_at,
+      });
+      // Invoke server-side function to delete all notes
+      const { data, error } = await supabase.functions.invoke('delete-account', {
+        body: {},
+      });
+      if (error) {
+        throw error;
+      }
+      console.info('[Danger Zone] delete-account response:', data);
+
+      // Clear local state
+      setNotes([]);
+
+      toast({
+        title: "All notes deleted",
+        description: "All your notes have been permanently deleted.",
+      });
+    } catch (e) {
+      console.error("Error deleting notes:", e);
+      toast({
+        title: "Error",
+        description: "Failed to delete notes. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setAccountDeleting(false);
+      setDeleteAccountOpen(false);
+    }
+  };
+
   const handleSuggestTitle = async (note: Note) => {
     if (!note.content) return;
     
@@ -504,6 +549,43 @@ const Index = () => {
           });
         }}
       />
+
+      {/* Danger Zone */}
+      <div className="mt-12 border border-destructive/40 rounded-lg p-4 bg-destructive/5">
+        <h3 className="text-lg font-semibold text-destructive mb-2">Danger Zone</h3>
+        <p className="text-sm text-muted-foreground mb-4">
+          This will permanently delete all of your notes. This action cannot be undone.
+        </p>
+        <Button
+          variant="destructive"
+          onClick={() => setDeleteAccountOpen(true)}
+          disabled={!session?.user?.id}
+        >
+          Delete All Notes
+        </Button>
+      </div>
+
+      {/* Confirm Delete All Notes */}
+      <AlertDialog open={deleteAccountOpen} onOpenChange={setDeleteAccountOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete all notes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete all of your notes. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={accountDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDeleteAccount}
+              disabled={accountDeleting}
+            >
+              {accountDeleting ? "Deleting..." : "Yes, delete all notes"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Layout>
   );
 };
