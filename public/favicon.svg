@@ -1,18 +1,25 @@
-<!-- Favicon: centered brain inside a square -->
+<!-- Favicon: rounded purple→blue gradient square with centered white brain -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Square background (matches theme color) -->
-  <rect x="0" y="0" width="512" height="512" rx="64" fill="#0ea5e9" />
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+  </defs>
 
-  <!-- Brain icon (white stroke), scaled and centered -->
-  <g transform="translate(128,128) scale(1.6)" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M96 160V40" />
-    <path d="M120 116a33.36 33.36 0 0 1-24-32 33.36 33.36 0 0 1-24 32" />
-    <path d="M140.784 52A24 24 0 1 0 96 40a24 24 0 1 0-44.784 12" />
-    <path d="M143.976 42.5A32 32 0 0 1 160.208 89.16" />
-    <path d="M144 160a32 32 0 0 0 16-59.712" />
-    <path d="M159.736 156.864A32 32 0 1 1 96 160a32 32 0 1 1-63.736-.864" />
-    <path d="M48 160a32 32 0 0 1-16-59.712" />
-    <path d="M48.024 42.5A32 32 0 0 0 31.792 89.16" />
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#g)" />
+
+  <!-- Brain icon (lucide brain paths), scaled to center nicely -->
+  <g transform="translate(64,64) scale(16)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 18V5" />
+    <path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4" />
+    <path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5" />
+    <path d="M17.997 5.125a4 4 0 0 1 2.526 5.77" />
+    <path d="M18 18a4 4 0 0 0 2-7.464" />
+    <path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517" />
+    <path d="M6 18a4 4 0 0 1-2-7.464" />
+    <path d="M6.003 5.125a4 4 0 0 0-2.526 5.77" />
   </g>
 </svg>
 
