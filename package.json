@@ -13,6 +13,7 @@
                     "migrate:notes":  "node scripts/migrate-notes.mjs"
                 },
     "dependencies":  {
+                         "idb": "^8.0.3",
                          "@resvg/resvg-js":  "^2.6.2",
                          "png-to-ico":  "^2.1.8",
                          "@google/generative-ai":  "^0.24.1",
@@ -80,6 +81,7 @@
                          "zod":  "^3.25.76"
                      },
     "devDependencies":  {
+                            "vite-plugin-pwa": "^0.20.5",
                             "@eslint/js":  "^9.32.0",
                             "@tailwindcss/line-clamp":  "^0.4.4",
                             "@tailwindcss/typography":  "^0.5.16",

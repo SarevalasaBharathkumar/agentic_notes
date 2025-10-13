@@ -13,6 +13,7 @@ import { MessageSquare, Send, Sparkles, NotebookPen, RefreshCw, XCircle } from "
 import { useToast } from "@/hooks/use-toast";
 import { answerQuestionFromNotes, createSuggestedNote, recommendNotesFromContext, regenerateNoteContent } from "@/lib/gemini";
 import { MarkdownRenderer, transformMarkdownToHtml } from "@/components/MarkdownRenderer";
+// (imports consolidated above)
 
 interface Message {
   id: string;
@@ -92,6 +93,17 @@ export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNo
     setLoading(true);
 
     try {
+      // Offline notice: prevent AI calls when offline
+      if (!navigator.onLine) {
+        const aiOffline: Message = {
+          id: Date.now().toString() + "-ai-offline",
+          text: "You are offline. Connect to the internet to use INTA features.",
+          sender: "ai",
+        };
+        setMessages((prev) => [...prev, aiOffline]);
+        setLoading(false);
+        return;
+      }
       // Handle simple greetings without invoking AI
       if (isGreeting(userMessage.text)) {
         const aiGreeting: Message = {

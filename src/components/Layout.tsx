@@ -1,5 +1,5 @@
 import { Brain } from "lucide-react";
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Button } from "./ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { Link } from "react-router-dom";
@@ -19,6 +19,19 @@ export const Layout = ({ children }: LayoutProps) => {
 };
 
 const Header = () => {
+  const [online, setOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+
   return (
     <header className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-10">
       <div className="container mx-auto px-4 py-4 flex items-center justify-between">
@@ -30,9 +43,20 @@ const Header = () => {
             Agentic Notepad
           </Link>
         </div>
-        <Button variant="outline" onClick={() => supabase.auth.signOut()}>
-          Sign Out
-        </Button>
+        <div className="flex items-center gap-3">
+          <div
+            className={`px-2 py-1 rounded text-xs font-medium border ${online
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900'
+              : 'bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-100 border-amber-200 dark:border-amber-900'
+            }`}
+            aria-live="polite"
+          >
+            {online ? 'Online' : 'Offline'}
+          </div>
+          <Button variant="outline" onClick={() => supabase.auth.signOut()}>
+            Sign Out
+          </Button>
+        </div>
       </div>
     </header>
   );

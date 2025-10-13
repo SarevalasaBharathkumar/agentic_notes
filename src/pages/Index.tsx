@@ -10,6 +10,7 @@ import { NotesGrid } from "@/components/NotesGrid";
 import { Loading } from "@/components/Loading";
 import { ChatDialog } from "@/components/ChatDialog";
 import { NoteDialog } from "@/components/NoteDialog";
+import { offline } from "@/lib/offline";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -86,20 +87,30 @@ const Index = () => {
   const handleCreateNoteFromChat = async (note: { title: string; content: string }) => {
     if (!session?.user?.id) return;
     try {
-      const { data, error } = await supabase
-        .from("notes")
-        .insert({
+      if (navigator.onLine) {
+        const { data, error } = await supabase
+          .from("notes")
+          .insert({
+            title: note.title,
+            content: note.content,
+            user_id: session.user.id,
+          })
+          .select("*")
+          .single();
+        if (error) throw error;
+        setNotes((prev) => [data as Note, ...prev]);
+      } else {
+        const local = {
+          id: offline.makeId(),
           title: note.title,
           content: note.content,
           user_id: session.user.id,
-        })
-        .select("*")
-        .single();
-
-      if (error) throw error;
-
-      // Prepend newly created note to the list
-      setNotes((prev) => [data as Note, ...prev]);
+          updated_at: new Date().toISOString(),
+        } as Note;
+        await offline.putLocalNote(local as any);
+        await offline.queueUpsert(local as any);
+        setNotes((prev) => [local, ...prev]);
+      }
       toast({ title: "Note saved", description: `Added "${note.title}" from assistant.` });
     } catch (e) {
       console.error("Error creating note from chat:", e);
@@ -120,35 +131,40 @@ const Index = () => {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Fetch notes when session changes
+  // Fetch notes when session changes (with offline support)
   useEffect(() => {
     if (session?.user?.id) {
-      const fetchNotes = async () => {
+      const userId = session.user.id;
+      const hydrateFromLocal = async () => {
+        const local = await offline.getLocalNotes(userId);
+        setNotes(local as any);
+      };
+
+      const fetchRemoteAndMerge = async () => {
         const { data, error } = await supabase
           .from("notes")
           .select("*")
-          .eq("user_id", session.user.id)
+          .eq("user_id", userId)
           .order("updated_at", { ascending: false });
-
-        if (error) {
-          console.error("Error fetching notes:", error);
-          return;
+        if (!error && data) {
+          await offline.mergeRemoteIntoLocal(data as any);
+          const local = await offline.getLocalNotes(userId);
+          setNotes(local as any);
         }
-
-        const stripHtml = (s: string) => (s || "").replace(/<[^>]*>/g, " ").trim();
-        const filtered = (data || []).filter(n => (n.title && n.title.trim()) || stripHtml(n.content));
-        const sorted = (filtered as Note[]).slice().sort((a, b) => {
-          const ap = (a.tags || []).includes('pinned') ? 1 : 0;
-          const bp = (b.tags || []).includes('pinned') ? 1 : 0;
-          if (ap !== bp) return bp - ap; // pinned first
-          const ta = new Date(a.updated_at || 0).getTime();
-          const tb = new Date(b.updated_at || 0).getTime();
-          return tb - ta;
-        });
-        setNotes(sorted);
       };
 
-      fetchNotes();
+      // Always show whatever we have locally first
+      hydrateFromLocal();
+      // Try to sync pending if back online
+      if (navigator.onLine) offline.syncPending(userId).then(() => fetchRemoteAndMerge());
+      else fetchRemoteAndMerge().catch(() => {});
+
+      // When coming back online, sync pending and refresh
+      const onOnline = async () => {
+        await offline.syncPending(userId);
+        await fetchRemoteAndMerge();
+      };
+      window.addEventListener('online', onOnline);
 
       // Subscribe to realtime changes
       const subscription = supabase
@@ -161,9 +177,10 @@ const Index = () => {
             table: "notes",
             filter: `user_id=eq.${session.user.id}`,
           },
-          (payload) => {
-            // Remove the deleted note from state
+          async (payload) => {
+            // Remove the deleted note from state and local db
             setNotes(currentNotes => currentNotes.filter(note => note.id !== payload.old.id));
+            await offline.deleteLocalNote((payload.old as any).id);
           }
         )
         .on(
@@ -174,9 +191,9 @@ const Index = () => {
             table: "notes",
             filter: `user_id=eq.${session.user.id}`,
           },
-          () => {
-            // Fetch all notes for new insertions
-            fetchNotes();
+          async () => {
+            // Refetch and merge
+            await fetchRemoteAndMerge();
           }
         )
         .on(
@@ -187,25 +204,18 @@ const Index = () => {
             table: "notes",
             filter: `user_id=eq.${session.user.id}`,
           },
-          (payload) => {
-            // Update the modified note in state and maintain sort (pinned first, then updated_at desc)
-            setNotes(currentNotes => {
-              const next = currentNotes.map(note => note.id === (payload.new as any).id ? (payload.new as Note) : note);
-              return next.slice().sort((a, b) => {
-                const ap = (a.tags || []).includes('pinned') ? 1 : 0;
-                const bp = (b.tags || []).includes('pinned') ? 1 : 0;
-                if (ap !== bp) return bp - ap;
-                const ta = new Date(a.updated_at || 0).getTime();
-                const tb = new Date(b.updated_at || 0).getTime();
-                return tb - ta;
-              });
-            });
+          async (payload) => {
+            // Update/merge then hydrate from local
+            await offline.putLocalNote(payload.new as any);
+            const local = await offline.getLocalNotes(userId);
+            setNotes(local as any);
           }
         )
         .subscribe();
 
       return () => {
         subscription.unsubscribe();
+        window.removeEventListener('online', onOnline);
       };
     }
   }, [session]);
@@ -255,12 +265,16 @@ const Index = () => {
         toast({ title: "Note removed", description: "Unsaved note draft was discarded." });
         return;
       }
-      const { error } = await supabase
-        .from("notes")
-        .delete()
-        .eq("id", noteToDelete.id);
-
-      if (error) throw error;
+      if (navigator.onLine) {
+        const { error } = await supabase
+          .from("notes")
+          .delete()
+          .eq("id", noteToDelete.id);
+        if (error) throw error;
+      } else if (session?.user?.id) {
+        await offline.deleteLocalNote(noteToDelete.id);
+        await offline.queueDelete(noteToDelete.id, session.user.id);
+      }
       
       // Immediately update the UI by removing the deleted note
       setNotes(currentNotes => currentNotes.filter(note => note.id !== noteToDelete.id));
@@ -523,6 +537,7 @@ const Index = () => {
       <NoteDialog
         note={selectedNote}
         open={noteDialogOpen}
+        userId={session.user?.id}
         onOpenChange={(isOpen) => {
           if (isOpen) {
             if (!pushedNoteRef.current) {

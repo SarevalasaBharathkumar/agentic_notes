@@ -15,6 +15,7 @@ import { generateTitle } from "@/lib/gemini";
 import React from "react";
 // markdown-to-html handled within rich editor for initialization
 import { RichNoteEditor } from "@/components/RichNoteEditor";
+import { offline } from "@/lib/offline";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,9 +40,10 @@ interface NoteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdateNote?: (note: Partial<Note>) => void;
+  userId?: string;
 }
 
-export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote }: NoteDialogProps) => {
+export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: NoteDialogProps) => {
   const [title, setTitle] = useState(note?.title ?? "");
   const [content, setContent] = useState(note?.content ?? "");
   const [originalTitle, setOriginalTitle] = useState(note?.title ?? "");
@@ -106,11 +108,16 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote }: NoteDialo
       const isEmpty = !titleToSave && !content?.replace(/<[^>]*>/g, '').trim();
       if (isEmpty) {
         if (note?.id) {
-          const { error } = await supabase
-            .from("notes")
-            .delete()
-            .eq("id", note.id);
-          if (error) throw error;
+          if (navigator.onLine) {
+            const { error } = await supabase
+              .from("notes")
+              .delete()
+              .eq("id", note.id);
+            if (error) throw error;
+          } else if (userId) {
+            await offline.deleteLocalNote(note.id);
+            await offline.queueDelete(note.id, userId);
+          }
           onUpdateNote?.(null as any);
         }
         setHasChanges(false);
@@ -119,27 +126,43 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote }: NoteDialo
 
       if (note?.id) {
         // Update existing note
-        const { error } = await supabase
-          .from("notes")
-          .update(updateData)
-          .eq("id", note.id);
-          
-        if (error) throw error;
+        if (navigator.onLine) {
+          const { error } = await supabase
+            .from("notes")
+            .update(updateData)
+            .eq("id", note.id);
+          if (error) throw error;
+        } else if (userId) {
+          const localNote = { id: note.id, user_id: userId, ...updateData } as Note;
+          await offline.putLocalNote(localNote as any);
+          await offline.queueUpsert(localNote as any);
+        }
         // Immediately reflect in UI
         onUpdateNote?.({ id: note.id, ...updateData });
       } else {
         // Create new note
-        const { data, error } = await supabase
-          .from("notes")
-          .insert({
-            ...updateData,
-            user_id: (await supabase.auth.getUser()).data.user?.id,
-          })
-          .select()
-          .single();
-          
-        if (error) throw error;
-        if (data && onUpdateNote) onUpdateNote(data);
+        const authUser = (await supabase.auth.getUser()).data.user;
+        const effectiveUserId = userId || authUser?.id;
+        if (!effectiveUserId) throw new Error("User not authenticated");
+
+        if (navigator.onLine) {
+          const { data, error } = await supabase
+            .from("notes")
+            .insert({
+              ...updateData,
+              user_id: effectiveUserId,
+            })
+            .select()
+            .single();
+          if (error) throw error;
+          if (data && onUpdateNote) onUpdateNote(data);
+        } else {
+          const id = offline.makeId();
+          const localNote = { id, user_id: effectiveUserId, ...updateData } as Note;
+          await offline.putLocalNote(localNote as any);
+          await offline.queueUpsert(localNote as any);
+          onUpdateNote?.(localNote);
+        }
       }
       setHasChanges(false);
       return true;
