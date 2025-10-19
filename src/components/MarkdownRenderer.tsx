@@ -7,11 +7,11 @@ import React from "react";
 
 function escapeHtml(input: string) {
   return input
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");  
 }
 
 function isHttpUrl(u: string) {
@@ -137,8 +137,12 @@ function renderInline(md: string) {
   md = md.replace(/(^|[\s\(\[])((https?:\/\/)[^\s<>()\[\]]+)/g, (_m, p1: string, url: string) => {
     return `${p1}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
   });
-  // bold **text**
-  md = md.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  // bold **text** with special handling for AI tools
+  md = md.replace(/\*\*(gemini|chat\s*gpt|runcraft\s*ai)\*\*(\*+)?/gi, (match, tool) => {
+    return `<strong class="ai-tool-highlight">${tool}</strong>`;
+  });
+  // Regular bold text
+  md = md.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
   // italic *text*
   md = md.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
   // inline code `code`
@@ -171,14 +175,18 @@ function renderCodeBlocks(text: string) {
 function restoreCodeBlocks(text: string, blocks: string[]) {
   let out = text;
   for (let i = 0; i < blocks.length; i++) {
-    out = out.replaceAll(`@@CODEBLOCK_${i}@@`, blocks[i]);
+    out = out.replace(`@@CODEBLOCK_${i}@@`, blocks[i]);
   }
   return out;
 }
 
 function toHtml(markdown: string) {
-  // Escape HTML first
-  const escaped = escapeHtml(markdown);
+  if (!markdown) return "";
+  
+  // First remove any existing HTML tags
+  let cleaned = markdown.replace(/<[^>]*>/g, '');
+  //Then escape HTML to prevent injection
+  const escaped = escapeHtml(cleaned);
   // Protect code blocks
   const { out: codeProtected, blocks } = renderCodeBlocks(escaped);
   // Headings
@@ -195,7 +203,7 @@ function toHtml(markdown: string) {
   const parts = html.split(/\n\s*\n/).map((p) => {
     // if already starts with a block tag, keep as is; otherwise wrap in <p>
     if (/^\s*<(h\d|ul|ol|pre|table|blockquote)/.test(p)) return p;
-    return `<p>${p.replaceAll("\n", "<br/>")}</p>`;
+    return `<p>${p.replace(/\n/g, "<br/>")}</p>`;
   });
   html = parts.join("\n");
   // Restore code blocks

@@ -8,21 +8,21 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useState, useRef, useEffect } from "react";
-import { MessageSquare, Send, Sparkles, NotebookPen, RefreshCw, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { MessageSquare, Send, Sparkles, NotebookPen, XCircle, RotateCcw, Brain } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { answerQuestionFromNotes, createSuggestedNote, recommendNotesFromContext, regenerateNoteContent } from "@/lib/gemini";
+import { embeddingNoteRetrieval, answerQuestionFromNotes, createSuggestedNote, NoteLike } from "@/lib/gemini";
 import { MarkdownRenderer, transformMarkdownToHtml } from "@/components/MarkdownRenderer";
-// (imports consolidated above)
 
 interface Message {
   id: string;
   text: string;
   sender: "user" | "ai";
-  isInternetSearch?: boolean;
-  internetSearchUrl?: string;
   suggestedNote?: { title: string; content: string };
-  recommendedNoteIds?: string[];
+  suggestForQuery?: string;
+  isTyping?: boolean;
+  isThinking?: boolean;
+  awaitingSuggestion?: boolean; // Track if we're waiting for suggestion confirmation
 }
 
 interface ChatDialogProps {
@@ -34,178 +34,600 @@ interface ChatDialogProps {
 }
 
 const ASSISTANT_NAME = "INTA";
+const GREETING_MESSAGE = "Hi! I'm INTA (Intelligent Note Taking Agent). I can answer questions from your notes, open specific notes, or suggest new ones. What would you like to know?";
+
+// Intent detection functions
+const isGreetingIntent = (text: string): boolean => {
+  const t = text.trim().toLowerCase();
+  return /^(hi|hello|hey|greetings|howdy|hola|what's up|good morning|good afternoon|good evening)\b/.test(t);
+};
+
+const isOpenIntent = (text: string): boolean => {
+  const t = text.trim().toLowerCase();
+  // More precise pattern matching for opening notes
+  return (/^(open|show|view|display|go to|find)\s+(my\s+)?(note|notes?)(\s+about|\s+on|\s+for|\s+related\s+to)?/.test(t) ||
+         /^(open|show|view|display|go to|find)\s+.{1,30}(\s+(note|notes?))?/.test(t) ||
+         // Match any content after open command
+         /^(open|show|view|display|find)\s+\w+/.test(t));
+};
+
+const isSuggestIntent = (text: string): boolean => {
+  const t = text.trim().toLowerCase();
+  return /^(suggest|create|make|write|draft|generate)\b.*\b(note|notes)\b/.test(t) ||
+         /\b(help me|can you|please)\b.*\b(write|create|make|suggest)\b/.test(t) ||
+         /^(suggest)\b/.test(t) ||
+         /^(ok|yes|sure)\b/.test(t); // Handle simple confirmations
+};
+
+const isQuestionIntent = (text: string): boolean => {
+  const t = text.trim().toLowerCase();
+  return /\?/.test(t) || 
+         /^(what|how|why|when|where|who|which|can|could|would|should|is|are|do|does|did)\b/.test(t) ||
+         /\b(rakul|preeth|singh|postal|code|groceries|shopping)\b/.test(t); // Handle names and other queries
+};
 
 export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNote }: ChatDialogProps) => {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      text: `Hi, I'm ${ASSISTANT_NAME}. I can help you search, summarize, and reason over your notes. What would you like to know?`,
-      sender: "ai",
-    },
+    { id: "1", text: GREETING_MESSAGE, sender: "ai" },
   ]);
   const [loading, setLoading] = useState(false);
-  const [regen, setRegen] = useState<Record<string, { typing: boolean; preview: string }>>({});
+  const [thinking, setThinking] = useState(false);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  const isNotAvailableAnswer = (text: string) =>
-    text.trim().toLowerCase().replace(/\.+$/, "") === "notes not available for your question";
-
-  const isGreeting = (text: string) => {
-    const t = text.trim().toLowerCase();
-    const simple = [
-      "hi", "hello", "hey", "yo", "sup", "hola", "hii", "hiii",
-      "good morning", "good afternoon", "good evening",
-    ];
-    if (simple.includes(t)) return true;
-    // very short and no question punctuation
-    return t.length <= 6 && !/[?]/.test(t);
-  };
-
-  const isSubstantiveQuery = (text: string) => {
-    const t = text.trim().toLowerCase();
-    if (isGreeting(t)) return false;
-    if (t.length < 10 && !/[?]/.test(t)) return false;
-    const keywords = ["how", "what", "why", "explain", "summar", "compare", "steps", "guide", "checklist", "table", "plan", "create note", "draft", "write"];
-    return keywords.some(k => t.includes(k)) || /[?]/.test(t);
-  };
+  const [regeneratingMsgId, setRegeneratingMsgId] = useState<string | null>(null);
 
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const toPlainText = (htmlOrMd: string) =>
-    /<\w+[\s\S]*>/.test(htmlOrMd)
-      ? htmlOrMd.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-      : htmlOrMd;
+  // Online/Offline detection
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
 
-  const handleSendMessage = async () => {
-    if (!input.trim()) return;
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
-    const userMessage: Message = { id: Date.now().toString(), text: input, sender: "user" };
-    setMessages((prevMessages) => [...prevMessages, userMessage]);
-    setInput("");
-    setLoading(true);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Check offline status when dialog is opened
+  useEffect(() => {
+    if (open && isOffline) {
+      toast({
+        title: "Offline Mode",
+        description: "Can't use the assistant in offline mode. Please check your internet connection.",
+        variant: "destructive"
+      });
+      onOpenChange(false); // Close the dialog
+    }
+  }, [open, isOffline, onOpenChange, toast]);
+
+  // Typing animation for AI messages with markdown support
+  const typeOutAiMessage = (fullText: string, messageId?: string) => {
+    // Process Markdown to ensure formatting is maintained during typing
+    // Check if text contains markdown formatting
+    const containsMarkdown = /[\*\_\`\#\-\>]/.test(fullText);
+    
+    const id = messageId || Date.now().toString() + "-ai-type";
+    const placeholder: Message = { id, text: "", sender: "ai", isTyping: true };
+    
+    if (messageId) {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, text: "", isTyping: true } : m));
+    } else {
+      setMessages(prev => [...prev, placeholder]);
+    }
+    
+    // For messages with complex markdown, use faster typing to avoid weird rendering
+    const speed = containsMarkdown ? 8 : 15;
+    
+    // Special handling for AI tools mentions
+    const aiToolsRegex = /\*\*(gemini|chat\s+gpt|runcraft\s+ai)\*\*/gi;
+    const hasAiTools = aiToolsRegex.test(fullText);
+    
+    // If there's bold/italic/code, we should type faster to avoid broken markdown
+    let i = 0;
+    const timer = setInterval(() => {
+      i++;
+      const partial = fullText.slice(0, i);
+      setMessages(prev => prev.map(m => 
+        m.id === id ? { ...m, text: partial, isTyping: i < fullText.length } : m
+      ));
+      if (i >= fullText.length) {
+        clearInterval(timer);
+      }
+    }, hasAiTools ? 5 : speed); // Even faster typing for AI tools mentions
+  };
+
+  // Thinking indicator
+  const showThinking = () => {
+    setThinking(true);
+    const thinkingMsg: Message = { 
+      id: Date.now().toString() + "-thinking", 
+      text: "Thinking...", 
+      sender: "ai", 
+      isThinking: true 
+    };
+    setMessages(prev => [...prev, thinkingMsg]);
+  };
+
+  const hideThinking = () => {
+    setThinking(false);
+    setMessages(prev => prev.filter(m => !m.isThinking));
+  };
+
+    // Find notes using semantic search with embeddings
+  const findMatchingNotes = async (query: string): Promise<NoteLike[]> => {
+    const noteObjects: NoteLike[] = notes.map(n => ({
+      id: n.id,
+      title: n.title || "Untitled",
+      content: n.content || ""
+    }));
+
+    // Use embedding-based search as the primary method
+    const searchResults = await embeddingNoteRetrieval(noteObjects, query);
+    
+    // Filter matches by similarity thresholds
+    const directMatches = searchResults.matches
+      .filter(m => m.similarity > 0.75) // High confidence matches
+      .map(m => m.note);
+
+    if (directMatches.length > 0) {
+      return directMatches;
+    }
+
+    // Use a lower threshold for related matches
+    const relatedMatches = searchResults.matches
+      .filter(m => m.similarity > 0.5) // Related matches
+      .map(m => m.note);
+      
+    if (relatedMatches.length > 0) {
+      return relatedMatches;
+    }
+
+    // For special cases like "shopping list", check title-based matches
+    const lowercaseQuery = query.toLowerCase().trim();
+    const titleMatches = noteObjects.filter(note => {
+      const title = note.title.toLowerCase();
+      return title.includes(lowercaseQuery) || lowercaseQuery.includes(title);
+    });
+
+    if (titleMatches.length > 0) {
+      return titleMatches;
+    }
+
+    // Return any matches above minimal threshold as last resort
+    return searchResults.matches
+      .filter(m => m.similarity > 0.3)
+      .map(m => m.note);
+  };
+
+  // Helper to immediately open a note and notify the user
+  const openNoteDirectly = (note: NoteLike) => {
+    onOpenNote?.(note.id!);
+    return true;
+  };
+
+  // Enhanced note opening with embedding-based search
+  const handleOpenNotes = async (query: string) => {
+    try {
+      // Extract the actual search term from the open command
+      let searchTerm = query.trim().toLowerCase();
+      // Remove leading open/show/find words and note-related words
+      searchTerm = searchTerm
+        .replace(/^(open|show|view|display|go to|find)\s+/i, "")
+        .replace(/\b(note|notes)\b\s*(about|on|for|related\s+to)?\s*/i, "")
+        .trim();
+      
+      // Find notes using semantic search
+      const matchingNotes = await findMatchingNotes(searchTerm);
+      
+      if (matchingNotes.length === 1) {
+        // If we have exactly one high-confidence match, open it directly
+        return openNoteDirectly(matchingNotes[0]);
+      }
+      
+      if (matchingNotes.length > 0) {
+        // Show list of matches with previews
+        const listText = `I found these notes that might be relevant:\n\n${
+          matchingNotes.map((note, i) => {
+            const preview = note.content ? 
+              note.content.replace(/<[^>]*>/g, '').slice(0, 100) + "..." : "";
+            return `${i + 1}. **${note.title}**\n   ${preview}`;
+          }).join('\n\n')
+        }\n\nWhich one would you like to open? You can:\n- Type a number\n- Type part of the title\n- Or ask a different question`;
+        
+        const listMessage: Message = {
+          id: Date.now().toString() + "-note-list",
+          text: listText,
+          sender: "ai",
+          suggestForQuery: JSON.stringify(matchingNotes.map(n => ({ 
+            id: n.id, 
+            title: n.title,
+            preview: n.content?.replace(/<[^>]*>/g, '').slice(0, 100)
+          })))
+        };
+        setMessages(prev => [...prev, listMessage]);
+        return;
+      }
+      
+      // If no matches found, suggest creating a new note
+      const noMatchMsg = "I couldn't find any notes matching your request. Would you like me to suggest a note about this topic?";
+      const suggestionPrompt: Message = {
+        id: Date.now().toString() + "-suggestion-prompt",
+        text: noMatchMsg,
+        sender: "ai",
+        awaitingSuggestion: true,
+        suggestForQuery: query
+      };
+      setMessages(prev => [...prev, suggestionPrompt]);
+    } catch (error) {
+      console.error("Error in handleOpenNotes:", error);
+      const errorMsg = "Sorry, I couldn't process your request right now. Please try again.";
+      typeOutAiMessage(errorMsg);
+    }
+  };
+
+  // Handle note selection from list
+  const handleNoteSelection = (selection: string, noteList: any[]) => {
+    const trimmed = selection.trim().toLowerCase();
+    
+    // First check if the user is asking a new question
+    if (isQuestionIntent(trimmed) || 
+        (isOpenIntent(trimmed) && !trimmed.match(/^\d+$/))) {
+      return false; // Signal that this should be treated as a new query
+    }
+    
+    // Handle number selections (including variations like "first", "second", etc.)
+    const numberWords = {
+      first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+      one: 1, two: 2, three: 3, four: 4, five: 5,
+      "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5
+    };
+    
+    // Check for numeric or word-based selection
+    const numMatch = selection.match(/\b(\d+)\b/);
+    const wordMatch = Object.entries(numberWords).find(([word]) => 
+      trimmed.includes(word) || trimmed.startsWith(word)
+    );
+    
+    if (numMatch || wordMatch) {
+      const num = numMatch ? 
+        parseInt(numMatch[1], 10) : 
+        wordMatch ? numberWords[wordMatch[0] as keyof typeof numberWords] : 0;
+        
+      if (num >= 1 && num <= noteList.length) {
+        const selectedNote = noteList[num - 1];
+        const openMsg = `Opening: ${selectedNote.title}\n\nFeel free to ask me any other questions about your notes!`;
+        typeOutAiMessage(openMsg);
+        onOpenNote?.(selectedNote.id);
+        return true;
+      }
+    }
+
+    // Check for title match (more flexible)
+    const matchingNote = noteList.find(note => {
+      const title = note.title.toLowerCase();
+      return title.includes(trimmed) || trimmed.includes(title) || 
+             title.split(' ').some(word => word.includes(trimmed)) ||
+             trimmed.split(' ').some(word => title.includes(word));
+    });
+    
+    if (matchingNote) {
+      const openMsg = `Opening: ${matchingNote.title}\n\nFeel free to ask me any other questions about your notes!`;
+      typeOutAiMessage(openMsg);
+      onOpenNote?.(matchingNote.id);
+      return true;
+    }
+
+    // No match found, but might be a new question
+    if (isQuestionIntent(trimmed) || isOpenIntent(trimmed)) {
+      return false; // Signal that this should be treated as a new query
+    }
+
+    // Truly no match found
+    const retryMsg = "I couldn't match that selection. Please type a number (1-" + noteList.length + ") or part of the title. You can also ask me a different question.";
+    typeOutAiMessage(retryMsg);
+    return true;
+  };
+
+  // Handle note suggestions
+  const handleSuggestNote = async (query: string) => {
+    try {
+      const suggestion = await createSuggestedNote(query);
+      const suggestionMsg: Message = {
+        id: Date.now().toString() + "-suggestion",
+        text: "Here's a suggested note for you:",
+        sender: "ai",
+        suggestedNote: suggestion,
+        suggestForQuery: query,
+      };
+      setMessages(prev => [...prev, suggestionMsg]);
+    } catch (error) {
+      console.error("Error creating suggestion:", error);
+      const errorMsg = "Sorry, I couldn't create a suggestion right now. Please try again.";
+      typeOutAiMessage(errorMsg);
+    }
+  };
+
+  // Format response text with proper markdown and strip HTML tags
+  const formatResponseWithMarkdown = (text: string): string => {
+    // First, strip any HTML tags
+    let formattedText = text.replace(/<[^>]*>/g, '');
+    
+    // Make AI tool names bold
+    const aiToolNames = ["gemini", "gfp gan", "chat gpt", "chatgpt", "gpt", "gfpgan", "dall-e", "stable diffusion", "midjourney", "ai"];
+    
+    // Replace AI tool mentions with bold versions
+    // Using case-insensitive regex with word boundaries
+    aiToolNames.forEach(tool => {
+      const escapedTool = tool.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const regex = new RegExp(`\\b${escapedTool}\\b`, 'gi');
+      formattedText = formattedText.replace(regex, `**${tool}**`);
+    });
+    
+    return formattedText;
+  };
+  
+  // Handle question answering with enhanced context from matching notes
+  const handleAnswerQuestion = async (question: string) => {
+    const noteObjects: NoteLike[] = notes.map(n => ({
+      id: n.id,
+      title: n.title || "Untitled",
+      content: n.content || ""
+    }));
 
     try {
-      // Offline notice: prevent AI calls when offline
-      if (!navigator.onLine) {
-        const aiOffline: Message = {
-          id: Date.now().toString() + "-ai-offline",
-          text: "You are offline. Connect to the internet to use INTA features.",
-          sender: "ai",
-        };
-        setMessages((prev) => [...prev, aiOffline]);
-        setLoading(false);
-        return;
-      }
-      // Handle simple greetings without invoking AI
-      if (isGreeting(userMessage.text)) {
-        const aiGreeting: Message = {
-          id: Date.now().toString() + "-ai-greet",
-          text: `Hi! I'm ${ASSISTANT_NAME}. Ask me anything about your notes, or request a summary, checklist, or table.`,
-          sender: "ai",
-        };
-        setMessages((prev) => [...prev, aiGreeting]);
-        setLoading(false);
-        return;
-      }
-
-      // Build a small relevant subset of notes to improve recognition
-      const q = userMessage.text.toLowerCase();
-      const keywords = Array.from(new Set(q.split(/[^a-z0-9]+/i).filter(Boolean))).slice(0, 12);
-      const scored = notes.map(n => {
-        const text = `${n.title} ${toPlainText(n.content)}`.toLowerCase();
-        const score = keywords.reduce((acc, w) => acc + (text.includes(w) ? 1 : 0), 0);
-        return { note: n, score };
-      }).sort((a,b) => b.score - a.score);
-      const top = scored.filter(s => s.score > 0).slice(0, 8).map(s => ({ title: s.note.title, content: s.note.content }));
-
-      // Use Gemini chat to answer strictly from user's notes
-      const answer = await answerQuestionFromNotes(top.length ? top : notes, userMessage.text);
-
-      // Always show the direct answer first
-      const baseResponse: Message = {
-        id: Date.now().toString() + "-ai",
-        text: answer,
-        sender: "ai",
-      };
-
-      // If notes are not available for the question, propose a suggested note
-      if (isNotAvailableAnswer(answer)) {
-        // Try recommending existing notes first
-        const indices = await recommendNotesFromContext(notes.map(n => ({ title: n.title, content: n.content })), userMessage.text);
-
-        if (indices.length > 0) {
-          const recMsg: Message = {
-            id: Date.now().toString() + "-ai-recs",
-            text: "I couldn't find an answer directly in your notes. Here are related notes:",
-            sender: "ai",
-            recommendedNoteIds: indices.map(i => notes[i]?.id).filter(Boolean) as string[],
-          };
-          setMessages((prev) => [...prev, baseResponse, recMsg]);
-          // Also offer creating a draft regardless of query length when no relevant notes
-          const suggestion = await createSuggestedNote(userMessage.text);
-          const suggestionMsg: Message = {
-            id: Date.now().toString() + "-ai-suggest",
-            text: "Would you like to save a suggested note based on your question?",
-            sender: "ai",
-            suggestedNote: suggestion,
-          };
-          setMessages((prev) => [...prev, suggestionMsg]);
-        } else {
-          // No recommendations; still propose a draft for user to insert
-          const suggestion = await createSuggestedNote(userMessage.text);
-          const suggestionMsg: Message = {
-            id: Date.now().toString() + "-ai-suggest",
-            text: "Would you like to save a suggested note based on your question?",
-            sender: "ai",
-            suggestedNote: suggestion,
-          };
-          setMessages((prev) => [...prev, baseResponse, suggestionMsg]);
-        }
+      // First find potentially relevant notes to provide context to Gemini
+      const relevantNotes = await findMatchingNotes(question);
+      console.log(`Found ${relevantNotes.length} potentially relevant notes for the question`);
+      
+      // If we found matching notes, provide them as context along with the question
+      let answer;
+      if (relevantNotes.length > 0) {
+        // Send only the most relevant notes (max 3) to keep context focused
+        const contextNotes = relevantNotes.slice(0, 3);
+        
+        // Create enhanced question with context
+        const contextString = `Context from matching notes:\n${contextNotes.map(note => 
+          `Note Title: ${note.title}\nContent: ${note.content}\n---\n`
+        ).join('')}`;
+        
+        console.log("Sending question with enhanced context to Gemini");
+        answer = await answerQuestionFromNotes(
+          noteObjects, 
+          question,
+          { relevantNotesContext: contextString }
+        );
       } else {
-        setMessages((prevMessages) => [...prevMessages, baseResponse]);
+        // No matching notes found, proceed with regular question answering
+        answer = await answerQuestionFromNotes(noteObjects, question);
       }
+      
+      if (answer.toLowerCase().includes("notes not available")) {
+        const noAnswerMsg = "I couldn't find relevant information in your notes for this question. Would you like me to suggest a note about this topic?";
+        const suggestionPrompt: Message = {
+          id: Date.now().toString() + "-suggestion-prompt",
+          text: noAnswerMsg,
+          sender: "ai",
+          awaitingSuggestion: true,
+          suggestForQuery: question // Store the original question for context
+        };
+        setMessages(prev => [...prev, suggestionPrompt]);
+        return;
+      }
+
+      // Format the answer with proper markdown
+      const formattedAnswer = formatResponseWithMarkdown(answer);
+      typeOutAiMessage(formattedAnswer);
     } catch (error) {
-      console.error("Error sending message:", error);
-      toast({
-        title: "Error",
-        description: "Failed to get AI response. Please try again.",
-        variant: "destructive",
+      console.error("Error answering question:", error);
+      const errorMsg = "Sorry, I couldn't process your question right now. Please try again.";
+      typeOutAiMessage(errorMsg);
+    }
+  };
+
+  // Regenerate suggestion
+  const handleRegenerateSuggestion = async (messageId: string, query?: string) => {
+    if (!query) return;
+    
+    setRegeneratingMsgId(messageId);
+    setMessages(prev => prev.map(m => 
+      m.id === messageId ? { ...m, suggestedNote: undefined } : m
+    ));
+
+    try {
+      const suggestion = await createSuggestedNote(query);
+      setMessages(prev => prev.map(m => 
+        m.id === messageId ? { ...m, suggestedNote: suggestion } : m
+      ));
+    } catch (error) {
+      console.error("Error regenerating suggestion:", error);
+      toast({ 
+        title: "Error", 
+        description: "Failed to regenerate suggestion. Please try again.", 
+        variant: "destructive" 
       });
-      setMessages((prevMessages) => [
-        ...prevMessages,
-        { id: Date.now().toString() + "-error", text: "Sorry, I couldn't process that. Please try again.", sender: "ai" },
-      ]);
     } finally {
-      setLoading(false);
+      setRegeneratingMsgId(null);
     }
   };
 
-  const handleMakeNote = (text: string, url?: string) => {
-    if (onNewNote) {
-      const title = text.split(". ")[0] || "Internet Note";
-      const content = url ? `${text}\n\nSource: ${url}` : text;
-      onNewNote({ title, content });
-      toast({
-        title: "Note Created",
-        description: "A new note has been created from the internet search result.",
-      });
-    }
-  };
-
+  // Accept suggested note
   const handleAcceptSuggestedNote = (note: { title: string; content: string }) => {
     if (onNewNote) {
-      // Convert markdown suggestion to HTML so it opens richly in the editor
       const html = transformMarkdownToHtml(note.content || "");
       onNewNote({ title: note.title, content: html });
-      toast({ title: "Note Created", description: `Saved: ${note.title}` });
+      toast({ 
+        title: "Note Created", 
+        description: `Saved: ${note.title}` 
+      });
+    }
+  };
+
+  // Main message handler
+  const handleSendMessage = async () => {
+    if (!input.trim()) return;
+    
+    // Check offline status first
+    if (isOffline) {
+      const offlineMessage: Message = {
+        id: Date.now().toString(),
+        text: "Please turn on your internet connection to use the chat assistant.",
+        sender: "ai"
+      };
+      setMessages(prev => [
+        ...prev,
+        { id: Date.now().toString(), text: input.trim(), sender: "user" },
+        offlineMessage
+      ]);
+      setInput("");
+      return;
+    }
+    
+    const userMessage: Message = { 
+      id: Date.now().toString(), 
+      text: input.trim(), 
+      sender: "user" 
+    };
+    setMessages(prev => [...prev, userMessage]);
+    
+    const query = input.trim();
+    console.log("Processing query:", query);
+    setInput("");
+    setLoading(true);
+    showThinking();
+
+    try {
+      // Direct suggestion handling when message starts with 'suggest'
+      if (query.trim().toLowerCase().startsWith('suggest')) {
+        console.log("Detected direct suggestion request");
+        await handleSuggestNote(query);
+        return;
+      }
+
+      // Check if user sent a greeting
+      if (isGreetingIntent(query)) {
+        console.log("Detected greeting intent");
+        typeOutAiMessage("Hello! How can I help you today? I can answer questions about your notes, open specific notes, or suggest new ones.");
+        return;
+      }
+      
+      // Check if this is a note selection from a previous list
+      const lastMessage = messages[messages.length - 1];
+      console.log("Last message:", lastMessage);
+      
+      if (lastMessage?.suggestForQuery && lastMessage.sender === "ai" && !lastMessage.suggestedNote) {
+        try {
+          const noteList = JSON.parse(lastMessage.suggestForQuery);
+          console.log("Found note list:", noteList);
+          if (Array.isArray(noteList) && noteList.length > 0) {
+            // Check if this looks like a note selection (number or partial title match)
+            const trimmed = query.toLowerCase().trim();
+            
+            // First check if it's a new question or command
+            if (isQuestionIntent(trimmed) || 
+                (isOpenIntent(trimmed) && !trimmed.match(/^\d+$/))) {
+              console.log("User asked a new question instead of selecting from list");
+              // Skip selection logic and continue with normal flow
+            } else {
+              // Check for number selection
+              const numMatch = query.match(/\b(\d+)\b/);
+              const isNumberSelection = numMatch && parseInt(numMatch[1], 10) >= 1 && parseInt(numMatch[1], 10) <= noteList.length;
+            
+            // Check for selection by title, but only if it's a very clear match
+            const clearSelectionMatches = noteList.filter(note => {
+              const noteTitle = note.title.toLowerCase();
+              return noteTitle === trimmed || // Exact match
+                     noteTitle.startsWith(trimmed + " ") || // Starts with the term
+                     noteTitle.endsWith(" " + trimmed) || // Ends with the term
+                     /^\d+$/.test(trimmed); // Is just a number
+            });
+            
+            const isClearTitleMatch = clearSelectionMatches.length === 1;
+            
+            // Try to handle as a note selection first
+            const handled = handleNoteSelection(query, noteList);
+            if (handled) {
+              return;
+            }
+            
+            // If not handled as a selection, it might be a new query
+            if (isOpenIntent(query)) {
+              // Extract search term from open command
+              let openSearchTerm = query.trim().toLowerCase();
+              openSearchTerm = openSearchTerm.replace(/^(open|show|view|display|go to|find)\s+/i, "").trim();
+                
+                // Check if any note title closely matches the open request
+                const directMatch = noteList.find(note => {
+                  const title = note.title.toLowerCase();
+                  return title.includes(openSearchTerm) || 
+                         openSearchTerm.split(/\W+/).some(term => 
+                           term.length > 3 && title.includes(term)
+                         );
+                });
+                
+                if (directMatch) {
+                  return openNoteDirectly({ 
+                    id: directMatch.id, 
+                    title: directMatch.title, 
+                    content: "" 
+                  });
+                }
+              }
+              
+              // User is asking a new question, not selecting from the list
+              console.log("User asked new question instead of selecting from list");
+              // Continue with normal flow below
+            }
+          }
+        } catch (e) {
+          console.log("Not a note list:", e);
+          // Not a note list, continue with normal flow
+        }
+      }
+
+      // Check if we're awaiting a suggestion confirmation
+      if (lastMessage?.awaitingSuggestion && lastMessage.sender === "ai") {
+        const trimmed = query.toLowerCase().trim();
+        if (trimmed === "ok" || trimmed === "yes" || trimmed === "sure" || trimmed === "y" || trimmed === "yeah") {
+          console.log("User confirmed suggestion request");
+          await handleSuggestNote(lastMessage.suggestForQuery || query);
+          return;
+        }
+      }
+
+      // Check for explicit suggestion requests
+      if (isSuggestIntent(query) || query.toLowerCase().includes('suggest')) {
+        console.log("Detected suggestion intent");
+        await handleSuggestNote(query);
+        return;
+      }
+
+      // Determine intent and handle accordingly
+      if (isOpenIntent(query)) {
+        console.log("Detected open intent");
+        await handleOpenNotes(query);
+      } else if (isQuestionIntent(query)) {
+        console.log("Detected question intent");
+        await handleAnswerQuestion(query);
+      } else {
+        console.log("Default: treating as question");
+        // Default: try to answer as question, fallback to suggestion
+        await handleAnswerQuestion(query);
+      }
+    } catch (error) {
+      console.error("Error processing message:", error);
+      const errorMsg = "Sorry, I encountered an error. Please try again.";
+      typeOutAiMessage(errorMsg);
+    } finally {
+      setLoading(false);
+      hideThinking();
     }
   };
 
@@ -219,190 +641,108 @@ export const ChatDialog = ({ open, onOpenChange, onNewNote, notes = [], onOpenNo
             <Sparkles className="h-4 w-4 text-accent" />
           </div>
           <DialogDescription>
-            INTA = Intelligent Note Taking Agent. Ask me anything about your notes.
+            Intelligent Note Taking Agent - Answer questions, open notes, or get suggestions
           </DialogDescription>
         </DialogHeader>
 
         <ScrollArea className="flex-1 p-4">
           <div className="space-y-4">
             {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}
-              >
+              <div key={message.id} className={`flex ${message.sender === "user" ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`w-full rounded-md p-3 text-sm border ${message.sender === "user"
-                    ? "bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-100 border-blue-200 dark:border-blue-900 text-right"
-                    : "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900 text-left"
+                  className={`w-full rounded-md p-3 text-sm border ${
+                    message.sender === "user"
+                      ? "bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-100 border-blue-200 dark:border-blue-900 text-right"
+                      : "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900 text-left"
                   }`}
                 >
-                  {message.text}
-                  {message.recommendedNoteIds && message.recommendedNoteIds.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {message.recommendedNoteIds.map((nid) => {
-                        const n = notes.find(nn => nn.id === nid);
-                        if (!n) return null;
-                        return (
-                          <Button key={nid} variant="secondary" size="sm" onClick={() => onOpenNote?.(nid)}>
-                            {n.title}
-                          </Button>
-                        );
-                      })}
+                  {message.isThinking ? (
+                    <div className="flex items-center gap-2">
+                      <Brain className="h-4 w-4 animate-pulse" />
+                      <span className="animate-pulse">{message.text}</span>
                     </div>
+                  ) : (
+                    <>
+                      <MarkdownRenderer markdown={message.text} />
+                      {message.isTyping && <span className="animate-pulse">|</span>}
+                    </>
                   )}
+                  
                   {message.suggestedNote && (
-                    <div className="mt-3 w-full border rounded-md bg-background text-foreground">
-                      <div className="px-3 py-2 border-b font-medium flex items-center gap-2">
-                        <NotebookPen className="h-4 w-4 text-primary" />
-                        <span>{message.suggestedNote.title}</span>
+                    <div className="mt-3 border rounded-md overflow-hidden bg-white dark:bg-gray-800">
+                      <div className="p-3 border-b font-medium bg-gray-50 dark:bg-gray-700">
+                        {message.suggestedNote.title}
                       </div>
-                      <div className="p-3 w-full prose prose-sm max-w-none whitespace-pre-wrap">
-                        {/* When regenerating, hide previous content and show typing area only */}
-                        {regen[message.id]?.typing ? (
-                          <div className="p-3 rounded-md bg-muted/50 text-sm">
-                            <div className="mb-2 flex items-center gap-2 text-muted-foreground">
-                              <RefreshCw className="h-4 w-4 animate-spin" /> Regenerating...
-                            </div>
-                            <div className="whitespace-pre-wrap">
-                              {regen[message.id]?.preview}
-                              <span className="animate-pulse">▍</span>
-                            </div>
-                          </div>
-                        ) : (
-                          <MarkdownRenderer markdown={message.suggestedNote.content} />
-                        )}
+                      <div className="p-3">
+                        <MarkdownRenderer markdown={message.suggestedNote.content} />
                       </div>
-                      <div className="p-3 pt-0">
-                        <div className="grid grid-cols-3 gap-2 w-full">
-                          <div className="flex justify-center">
-                            <Button
-                              variant="default"
-                              size="sm"
-                              className="gap-1 h-7 px-2 text-xs"
-                              onClick={() => handleAcceptSuggestedNote(message.suggestedNote!)}
-                            >
-                              <NotebookPen className="h-4 w-4" />
-                              Accept
-                            </Button>
-                          </div>
-                          <div className="flex justify-center">
-                            <Button
-                              variant="outline"
-                              size="icon"
-                              className="h-8 w-8"
-                              aria-label="Regenerate"
-                              onClick={async () => {
-                              try {
-                                // Immediately hide old content and start typing preview
-                                setRegen(prev => ({ ...prev, [message.id]: { typing: true, preview: "" } }));
-                                setMessages(prev => prev.map(m => (
-                                  m.id === message.id
-                                    ? { ...m, suggestedNote: { ...m.suggestedNote!, content: "" } }
-                                    : m
-                                )));
-                                // Regenerate content ONLY; keep the same title
-                                const newMd = await regenerateNoteContent(message.suggestedNote!.content, message.suggestedNote!.title);
-                                // Typewriter effect
-                                let i = 0;
-                                const step = () => {
-                                  i += Math.max(1, Math.floor(newMd.length / 60));
-                                  const slice = newMd.slice(0, Math.min(i, newMd.length));
-                                  setRegen(prev => ({ ...prev, [message.id]: { typing: true, preview: slice } }));
-                                  if (i < newMd.length) {
-                                    setTimeout(step, 20);
-                                  } else {
-                                    setMessages(prev => prev.map(m => (
-                                      m.id === message.id
-                                        ? { ...m, suggestedNote: { title: m.suggestedNote!.title, content: newMd } }
-                                        : m
-                                    )));
-                                    setRegen(prev => ({ ...prev, [message.id]: { typing: false, preview: "" } }));
-                                  }
-                                };
-                                step();
-                              } catch (e) {
-                                console.error("Error regenerating suggested note:", e);
-                                setRegen(prev => ({ ...prev, [message.id]: { typing: false, preview: "" } }));
-                              }
-                            }}
-                          >
-                              <RefreshCw className="h-4 w-4" />
-                            </Button>
-                          </div>
-                          <div className="flex justify-center">
-                            <Button
-                              variant="outline"
-                              size="icon"
-                              className="h-8 w-8"
-                              aria-label="Reject"
-                              onClick={() => {
-                                // Remove the suggested note from this message
-                                setMessages(prev => prev.map(m => (
-                                  m.id === message.id ? { ...m, suggestedNote: undefined } : m
-                                )));
-                              }}
-                            >
-                              <XCircle className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
+                      <div className="p-3 pt-0 flex gap-2 justify-center">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1 h-8 px-3 text-xs"
+                          disabled={regeneratingMsgId === message.id}
+                          onClick={() => handleRegenerateSuggestion(message.id, message.suggestForQuery)}
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Regenerate
+                        </Button>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="gap-1 h-8 px-3 text-xs"
+                          onClick={() => handleAcceptSuggestedNote(message.suggestedNote!)}
+                        >
+                          <NotebookPen className="h-3 w-3" />
+                          Insert
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1 h-8 px-3 text-xs"
+                          onClick={() => {
+                            setMessages(prev => prev.map(m => 
+                              m.id === message.id ? { ...m, suggestedNote: undefined } : m
+                            ));
+                          }}
+                        >
+                          <XCircle className="h-3 w-3" />
+                          Reject
+                        </Button>
                       </div>
-                    </div>
-                  )}
-                  {message.isInternetSearch && message.internetSearchUrl && (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      <a
-                        href={message.internetSearchUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="underline"
-                      >
-                        Source
-                      </a>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="ml-2 h-auto px-2 py-1"
-                        onClick={() => handleMakeNote(message.text, message.internetSearchUrl)}
-                      >
-                        <NotebookPen className="h-3 w-3 mr-1" /> Make Note
-                      </Button>
                     </div>
                   )}
                 </div>
               </div>
             ))}
-            {loading && (
-              <div className="flex justify-start">
-                <div className="w-full border rounded-md p-3 text-sm animate-pulse bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 border-emerald-200 dark:border-emerald-900 text-left">
-                  AI is thinking...
-                </div>
-              </div>
-            )}
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
 
-        <div className="border-t p-4">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSendMessage();
+        <div className="p-4 border-t flex items-center gap-2">
+          <Input
+            placeholder="Ask about your notes, open a note, or request suggestions..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { 
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage();
+              }
             }}
-            className="flex items-center gap-2"
+            disabled={loading}
+          />
+          <Button 
+            onClick={handleSendMessage} 
+            disabled={loading || !input.trim()} 
+            className="gap-1"
           >
-            <Input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your message..."
-              className="flex-1"
-            />
-            <Button type="submit" size="icon">
-              <Send className="h-4 w-4" />
-            </Button>
-          </form>
+            <Send className="h-4 w-4" />
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
   );
 };
+
+export default ChatDialog;

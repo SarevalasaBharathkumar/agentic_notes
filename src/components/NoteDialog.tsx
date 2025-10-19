@@ -88,13 +88,19 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: N
       }
 
       if (!titleToSave && plainContent) {
-        // Generate a short title from content
-        titleToSave = (await generateTitle(content)).trim() || "Untitled";
+        const online = typeof navigator !== 'undefined' && navigator.onLine;
+        if (online) {
+          // Try AI title only when online; otherwise fall back instantly
+          titleToSave = (await generateTitle(content)).trim() || "Untitled";
+        } else {
+          // Fast local title: first 60 chars of plain text
+          titleToSave = (plainContent.slice(0, 60) + (plainContent.length > 60 ? '…' : '')).trim() || "Untitled";
+        }
         setTitle(titleToSave);
       }
     } catch (e) {
       // Fallback if generation fails
-      titleToSave = titleToSave || (plainContent ? "Untitled" : "");
+      titleToSave = titleToSave || (plainContent ? (plainContent.slice(0, 60) + (plainContent.length > 60 ? '...' : '')).trim() : "");
       setTitle(titleToSave);
     }
 
@@ -114,6 +120,8 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: N
               .delete()
               .eq("id", note.id);
             if (error) throw error;
+            // Mirror deletion to local store when online
+            await offline.deleteLocalNote(note.id);
           } else if (userId) {
             await offline.deleteLocalNote(note.id);
             await offline.queueDelete(note.id, userId);
@@ -132,6 +140,9 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: N
             .update(updateData)
             .eq("id", note.id);
           if (error) throw error;
+          // Keep local store in sync
+          const localNote = { id: note.id, user_id: note.user_id, ...updateData } as Note;
+          await offline.putLocalNote(localNote as any);
         } else if (userId) {
           const localNote = { id: note.id, user_id: userId, ...updateData } as Note;
           await offline.putLocalNote(localNote as any);
@@ -141,8 +152,11 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: N
         onUpdateNote?.({ id: note.id, ...updateData });
       } else {
         // Create new note
-        const authUser = (await supabase.auth.getUser()).data.user;
-        const effectiveUserId = userId || authUser?.id;
+        let effectiveUserId = userId;
+        if (!effectiveUserId) {
+          const { data } = await supabase.auth.getUser();
+          effectiveUserId = data.user?.id;
+        }
         if (!effectiveUserId) throw new Error("User not authenticated");
 
         if (navigator.onLine) {
@@ -155,6 +169,7 @@ export const NoteDialog = ({ note, open, onOpenChange, onUpdateNote, userId }: N
             .select()
             .single();
           if (error) throw error;
+          if (data) await offline.putLocalNote(data as any);
           if (data && onUpdateNote) onUpdateNote(data);
         } else {
           const id = offline.makeId();

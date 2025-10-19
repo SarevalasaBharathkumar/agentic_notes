@@ -5,7 +5,6 @@ import { MessageSquare, Plus } from "lucide-react";
 import { generateTitle } from "@/lib/gemini";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { ToastAction } from "@/components/ui/toast";
 import { Layout } from "@/components/Layout";
 import { NotesGrid } from "@/components/NotesGrid";
 import { Loading } from "@/components/Loading";
@@ -44,36 +43,7 @@ const Index = () => {
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
   const [fallbackUserId, setFallbackUserId] = useState<string | undefined>();
-  const [online, setOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
-
-  useEffect(() => {
-    const handleOnline = () => {
-      setOnline(true);
-      toast({
-        title: "Connected",
-        description: "You're back online. Full functionality restored.",
-      });
-    };
-    
-    const handleOffline = () => {
-      setOnline(false);
-      toast({
-        title: "Offline Mode",
-        description: "Working offline. Some features are limited.",
-        variant: "destructive"
-      });
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
   const { toast } = useToast();
-  const MIN_FETCH_INTERVAL_MS = 60_000; // 1 minute cooldown for remote fetches
   
   // Track if we pushed a history entry for dialogs
   const pushedChatRef = useRef(false);
@@ -129,7 +99,6 @@ const Index = () => {
           .select("*")
           .single();
         if (error) throw error;
-        if (data) await offline.putLocalNote(data as any);
         setNotes((prev) => [data as Note, ...prev]);
       } else {
         const local = {
@@ -167,25 +136,10 @@ const Index = () => {
 
     // One-time offline notice on initial load
     if (!navigator.onLine) {
-      toast({ title: "Offline", description: "You are viewing offline." });
+      toast({ title: "Offline", description: "You are offline. Showing local notes." });
     }
 
     return () => subscription.unsubscribe();
-  }, []);
-
-  // Track connectivity for UI + toast on transition to offline
-  useEffect(() => {
-    const on = () => setOnline(true);
-    const off = () => {
-      setOnline(false);
-      toast({ title: "Offline", description: "You are viewing offline." });
-    };
-    window.addEventListener('online', on);
-    window.addEventListener('offline', off);
-    return () => {
-      window.removeEventListener('online', on);
-      window.removeEventListener('offline', off);
-    };
   }, []);
 
   // If offline and we don't have a session yet, try to restore last user id
@@ -205,7 +159,6 @@ const Index = () => {
       const hydrateFromLocal = async () => {
         const local = await offline.getLocalNotes(userId);
         setNotes(local as any);
-        return local as any as Note[];
       };
 
       const fetchRemoteAndMerge = async () => {
@@ -215,80 +168,25 @@ const Index = () => {
           .eq("user_id", userId)
           .order("updated_at", { ascending: false });
         if (!error && data) {
-          // Avoid resurrecting locally-deleted notes that are queued for deletion
-          const pendingDeletes = await offline.getPendingDeletes(userId);
-          const filtered = (data as any).filter((n: any) => !pendingDeletes.includes(n.id));
-          await offline.mergeRemoteIntoLocal(filtered as any);
+          await offline.mergeRemoteIntoLocal(data as any);
           const local = await offline.getLocalNotes(userId);
           setNotes(local as any);
-          // remote refresh complete, clear dirty flag if there are no pending ops
-          const res = await offline.isDirty();
-          if (res) {
-            const synced = await offline.getPendingDeletes(userId); // quick check: only deletes count here
-            // If no more pending ops (crude), clear dirty
-            if (synced.length === 0) await offline.setDirty(false);
-          }
-          // mark last fetch time
-          await offline.setLastFetchedAt(userId);
         }
-      };
-
-      const shouldFetch = async (localLen: number) => {
-        if (!navigator.onLine || !isAuthed) return false;
-        // Fetch if nothing locally
-        if (localLen === 0) return true;
-        // Fetch if there are pending ops for user
-        const pendingCount = await offline.getPendingCount(userId);
-        if (pendingCount > 0) return true;
-        // Fetch if beyond cooldown interval
-        const last = await offline.getLastFetchedAt(userId);
-        if (!last) return true;
-        return Date.now() - last > MIN_FETCH_INTERVAL_MS;
       };
 
       // Always show whatever we have locally first
-      hydrateFromLocal().then(async (local) => {
-        // If authenticated, try to sync + conditionally fetch remote when online
-        if (isAuthed && navigator.onLine) {
-          const res = await offline.syncPending(userId);
-          const needBySync = !!(res?.synced && res.synced > 0);
-          const needByPolicy = await shouldFetch(local?.length || 0);
-          if (needBySync || needByPolicy) {
-            await fetchRemoteAndMerge();
-          }
-        }
-      });
+      hydrateFromLocal();
+      // If authenticated, try to sync + fetch remote when online
+      if (isAuthed) {
+        if (navigator.onLine) offline.syncPending(userId).then(() => fetchRemoteAndMerge());
+        else fetchRemoteAndMerge().catch(() => {});
+      }
 
       // When coming back online, sync pending and refresh
       const onOnline = async () => {
         if (isAuthed) {
-          const t = toast({ title: "Reconnected", description: "Syncing changes…" });
-          try {
-            const res = await offline.syncPending(userId);
-            const localLen = (await offline.getLocalNotes(userId)).length;
-            const needByPolicy = await shouldFetch(localLen);
-            // Only fetch if we actually synced changes OR policy says it's time
-            if ((res?.synced && res.synced > 0) || needByPolicy) {
-              await fetchRemoteAndMerge();
-            } else {
-              t.dismiss();
-              return;
-            }
-            if (res?.synced && res.synced > 0) {
-              t.update({ title: "Synced", description: `Pushed ${res.synced} change${res.synced === 1 ? '' : 's'} to cloud.` });
-            } else {
-              t.dismiss();
-            }
-          } catch (e) {
-            t.update({
-              variant: "destructive",
-              title: "Sync failed",
-              description: "Will retry automatically. You can retry now.",
-              action: (
-                <ToastAction altText="Retry" onClick={() => onOnline()}>Retry</ToastAction>
-              ),
-            } as any);
-          }
+          await offline.syncPending(userId);
+          await fetchRemoteAndMerge();
         }
       };
       window.addEventListener('online', onOnline);
@@ -376,7 +274,6 @@ const Index = () => {
         .update({ tags: nextTags })
         .eq("id", note.id);
       if (error) throw error;
-      await offline.putLocalNote({ ...note, tags: nextTags } as any);
     } catch (e) {
       // Revert on error
       setNotes(curr => curr.map(n => n.id === note.id ? note : n));
@@ -399,7 +296,6 @@ const Index = () => {
           .delete()
           .eq("id", noteToDelete.id);
         if (error) throw error;
-        await offline.deleteLocalNote(noteToDelete.id);
       } else if (session?.user?.id) {
         await offline.deleteLocalNote(noteToDelete.id);
         await offline.queueDelete(noteToDelete.id, session.user.id);
@@ -434,7 +330,7 @@ const Index = () => {
         .delete()
         .eq("user_id", session.user.id);
       if (error) throw error;
-      await offline.clearAllLocal(session.user.id);
+
       setNotes([]);
       toast({
         title: "All notes deleted",
@@ -481,9 +377,6 @@ const Index = () => {
         throw error;
       }
 
-      // Keep local cache updated when online
-      await offline.putLocalNote({ ...note, title } as any);
-
       toast({
         title: "Title updated",
         description: "AI has suggested a new title for your note.",
@@ -509,9 +402,7 @@ const Index = () => {
   return (
     <Layout>
       <div className="max-w-6xl mx-auto">
-        {!online && (
-          <div className="text-center text-muted-foreground mb-4">You are viewing offline</div>
-        )}
+        <h2 className="text-2xl font-bold mb-6">Your Notes</h2>
         <NotesGrid 
           notes={notes.map(note => ({
             id: note.id,
@@ -624,22 +515,14 @@ const Index = () => {
           <Plus className="h-6 w-6 text-primary-foreground" />
         </Button>
         <Button
-          className={`rounded-full w-12 h-12 p-0 ${!online ? 'bg-gray-400' : 'shadow-glow bg-gradient-primary'}`}
+          className="rounded-full w-12 h-12 shadow-glow bg-gradient-primary p-0"
           onClick={() => {
-            if (!online) {
-              toast({
-                title: "Offline Mode",
-                description: "Can't use the assistant in offline mode. Please check your internet connection.",
-                variant: "destructive"
-              });
-              return;
-            }
             pushQueryParam("chat", "1");
             pushedChatRef.current = true;
             setChatOpen(true);
           }}
         >
-          <MessageSquare className={`h-6 w-6 ${!online ? 'text-gray-600' : 'text-primary-foreground'}`} />
+          <MessageSquare className="h-6 w-6 text-primary-foreground" />
         </Button>
       </div>
 
@@ -674,7 +557,6 @@ const Index = () => {
             setNoteDialogOpen(true);
           }
         }}
-        
       />
 
       <NoteDialog
