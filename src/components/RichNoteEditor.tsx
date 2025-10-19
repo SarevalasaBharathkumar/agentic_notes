@@ -30,10 +30,20 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
 
   const extensions = useMemo(() => {
     const raw = [
-      StarterKit.configure({ codeBlock: true }),
+      StarterKit.configure({ codeBlock: { HTMLAttributes: {} } }),
       Placeholder.configure({ placeholder: placeholder || "Write your note..." }),
-      TaskList,
-      TaskItem.configure({ nested: true }),
+      TaskList.configure({
+        HTMLAttributes: {
+          class: 'not-prose task-list',
+        },
+      }),
+      TaskItem.configure({
+        nested: true,
+        HTMLAttributes: {
+          class: 'task-item',
+          style: 'display: flex; align-items: baseline; gap: 0.5rem;',
+        },
+      }),
       Table.configure({ resizable: false }),
       TableRow,
       TableHeader,
@@ -81,7 +91,12 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
     const next = isLikelyHtml(value) ? value : transformMarkdownToHtml(value || "");
     // Only update if content actually differs to avoid loop
     if (editor.getHTML() !== next) {
-      editor.commands.setContent(next, false);
+      editor.commands.setContent(next, {
+        emitUpdate: false,
+        parseOptions: {
+          preserveWhitespace: true
+        }
+      });
     }
   }, [value, editor]);
 
@@ -105,8 +120,27 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
 
   if (!editor) return null;
 
+  // Ensure editor state is saved when content changes
+  useEffect(() => {
+    if (!editor) return;
+    
+    const handleUpdate = ({ editor, transaction }: { editor: any; transaction: any }) => {
+      if (!transaction.docChanged) return;
+      
+      // Always update on document changes
+      const html = editor.getHTML();
+      onChange(html);
+    };
+
+    editor.on('update', handleUpdate);
+    
+    return () => {
+      editor.off('update', handleUpdate);
+    };
+  }, [editor, onChange]);
+
   return (
-    <div className="border border-border rounded-md">
+    <div className="border border-border rounded-md [&_.task-list]:list-none [&_.task-list]:pl-0 [&_.task-item]:flex [&_.task-item]:items-baseline [&_.task-item]:gap-2 [&_.task-item]:my-1 [&_.task-item_input]:mt-[3px] [&_.task-item_p]:m-0">
       {/* Sticky toolbar: stays visible while the note scrolls */}
       <div className="sticky top-0 z-20 flex flex-wrap gap-1 p-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <Button type="button" variant="outline" size="icon" onClick={() => editor.chain().focus().undo().run()} aria-label="Undo">
@@ -226,8 +260,7 @@ export const RichNoteEditor: React.FC<RichNoteEditorProps> = ({ value, onChange,
                 if (!display) return;
                 if (hasSel) {
                   // apply link mark to selection
-                  // @ts-expect-error mark may not exist if Link missing
-                  editor!.chain().focus().setLink?.({ href: linkUrl.trim() }).run?.();
+                  editor!.chain().focus().setLink({ href: linkUrl.trim() }).run();
                 } else {
                   // insert linked text
                   editor!.chain().focus().insertContent(`<a href="${linkUrl.trim()}" target="_blank" rel="noopener noreferrer">${display}</a>`).run();

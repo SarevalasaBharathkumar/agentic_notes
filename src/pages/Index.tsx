@@ -275,12 +275,13 @@ const Index = () => {
               return;
             }
             if (res?.synced && res.synced > 0) {
-              t.update({ title: "Synced", description: `Pushed ${res.synced} change${res.synced === 1 ? '' : 's'} to cloud.` });
+              t.update({ id: t.id, title: "Synced", description: `Pushed ${res.synced} change${res.synced === 1 ? '' : 's'} to cloud.` });
             } else {
               t.dismiss();
             }
           } catch (e) {
             t.update({
+              id: t.id,
               variant: "destructive",
               title: "Sync failed",
               description: "Will retry automatically. You can retry now.",
