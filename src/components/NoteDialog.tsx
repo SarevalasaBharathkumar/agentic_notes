@@ -178,7 +178,7 @@ export const NoteDialog: React.FC<NoteDialogProps> = ({ note, open, onOpenChange
   return (
     <>
       <Dialog open={open} onOpenChange={(isOpen) => {
-        if (!isOpen && (hasChanges || isEditMode)) {
+        if (!isOpen && hasChanges) {
           setConfirmClose(true);
           return;
         }
@@ -308,7 +308,6 @@ export const NoteDialog: React.FC<NoteDialogProps> = ({ note, open, onOpenChange
                     if (hasChanges) {
                       setConfirmClose(true);
                     } else {
-                      setConfirmClose(false);
                       if (note) {
                         setIsEditMode(false);
                       } else {
