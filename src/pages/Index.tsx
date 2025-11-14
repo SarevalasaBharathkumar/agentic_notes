@@ -372,74 +372,12 @@ const Index = () => {
       };
       window.addEventListener('local-change', onLocalChange as EventListener);
 
-      // Subscribe to realtime changes
-      const subscription = isAuthed ? supabase
-        .channel(`notes_channel_${userId}`, { config: { broadcast: { self: true } } })
-        .on(
-          "postgres_changes",
-          {
-            event: "DELETE",
-            schema: "public",
-            table: "notes",
-            filter: `user_id=eq.${userId}`,
-          },
-          async (payload) => {
-            console.log("[Realtime] DELETE event received for note:", payload.old.id);
-            // Use the same sync pattern as INSERT: fetch and merge all remote notes
-            // This ensures the deleted note is removed and state is consistent
-            await fetchRemoteAndMerge();
-            toast({
-              title: "Note deleted",
-              description: "A note was deleted on another device.",
-              duration: 3000,
-            });
-          }
-        )
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "notes",
-            filter: `user_id=eq.${userId}`,
-          },
-          async () => {
-            console.log("[Realtime] INSERT event received");
-            // Refetch and merge
-            await fetchRemoteAndMerge();
-          }
-        )
-        .on(
-          "postgres_changes",
-          {
-            event: "UPDATE",
-            schema: "public",
-            table: "notes",
-            filter: `user_id=eq.${userId}`,
-          },
-          async (payload) => {
-            console.log("[Realtime] UPDATE event received for note:", payload.new.id);
-            // Update/merge then hydrate from local
-            await offline.putLocalNote(payload.new as any);
-            const local = await offline.getLocalNotes(userId);
-            setNotes(local as any);
-          }
-        )
-        .on("system", {}, (message) => {
-          console.log("[Realtime] System message:", message);
-        })
-        .subscribe((status, err) => {
-          console.log("[Realtime] Subscription status:", status, err);
-          if (err) {
-            console.error("[Realtime] Subscription error:", err);
-            toast({
-              title: "Realtime sync error",
-              description: "Failed to connect for live updates. Will sync manually.",
-              variant: "destructive",
-              duration: 5000,
-            });
-          }
-        }) : { unsubscribe: () => {} } as any;
+      // Realtime subscriptions are disabled intentionally to avoid unstable
+      // server-side bindings that cause subscription errors in some environments.
+      // We rely on the polling fallback and manual/queued sync to converge state
+      // across devices. Keep a noop subscription object so cleanup code can
+      // call unsubscribe safely.
+      const subscription = { unsubscribe: () => {} } as any;
 
       // Fallback polling: if realtime isn't reliably delivering deletes, poll
       // the server periodically to ensure eventual consistency. This is a
