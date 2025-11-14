@@ -389,14 +389,31 @@ const Index = () => {
         toast({ title: "Note removed", description: "Unsaved note draft was discarded." });
         return;
       }
+
       if (navigator.onLine) {
+        // Try to delete on the server first. If server delete fails, fall back to
+        // deleting locally and queueing the delete so it will be retried later.
         const { error } = await supabase
           .from("notes")
           .delete()
           .eq("id", noteToDelete.id);
-        if (error) throw error;
+        if (error) {
+          // Fallback: remove locally and queue delete for later retry
+          await offline.deleteLocalNote(noteToDelete.id);
+          if (session?.user?.id) await offline.queueDelete(noteToDelete.id, session.user.id);
+          throw error;
+        }
+
+        // Server-side delete succeeded. Ensure we don't have pending upserts that
+        // could resurrect the note later, then remove from local DB.
+        try {
+          await offline.removePendingForNote(noteToDelete.id, session?.user?.id);
+        } catch (e) {
+          // non-fatal
+        }
         await offline.deleteLocalNote(noteToDelete.id);
       } else if (session?.user?.id) {
+        // Offline path: remove locally and queue delete for later sync
         await offline.deleteLocalNote(noteToDelete.id);
         await offline.queueDelete(noteToDelete.id, session.user.id);
       }

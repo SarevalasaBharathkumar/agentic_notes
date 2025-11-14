@@ -148,6 +148,28 @@ export async function mergeRemoteIntoLocal(remote: NoteLike[]) {
   await tx.done
 }
 
+// Remove pending operations (upsert/delete) that reference a specific note id.
+// Useful after a server-side delete to avoid resurrecting the note from a queued upsert.
+export async function removePendingForNote(noteId: string, user_id?: string) {
+  const db = await getDB()
+  const tx = db.transaction('pending', 'readwrite')
+  const ops = await tx.store.getAll() as PendingOp[]
+  const keys = await tx.store.getAllKeys() as (number | string | undefined)[]
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]
+    const key = keys[i]
+    try {
+      if (!key) continue
+      if (op.kind === 'upsert' && (op.note?.id === noteId)) {
+        if (!user_id || op.note.user_id === user_id) await tx.store.delete(key as any)
+      } else if (op.kind === 'delete' && (op as any).noteId === noteId) {
+        if (!user_id || (op as any).user_id === user_id) await tx.store.delete(key as any)
+      }
+    } catch {}
+  }
+  await tx.done
+}
+
 // Read pending delete operations (used to avoid resurrecting notes before sync)
 export async function getPendingDeletes(user_id?: string): Promise<string[]> {
   const db = await getDB()
@@ -242,6 +264,7 @@ export const offline = {
   queueDelete,
   syncPending,
   mergeRemoteIntoLocal,
+  removePendingForNote,
   getPendingDeletes,
   getPendingCount,
   clearAllLocal,

@@ -3,6 +3,7 @@ import { ReactNode } from "react";
 import { Button } from "./ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { Link } from "react-router-dom";
+import { useToast } from "@/hooks/use-toast";
 
 interface LayoutProps {
   children: ReactNode;
@@ -19,6 +20,25 @@ export const Layout = ({ children }: LayoutProps) => {
 };
 
 const Header = () => {
+  const { toast } = useToast();
+
+  const handleSignOut = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        console.error("Sign out error:", error);
+        toast({ title: "Sign out failed", description: error.message || "Could not sign you out.", variant: "destructive" });
+        return;
+      }
+      // Clear client-side session storage (localStorage) and reload to reset app state
+      try { localStorage.removeItem('supabase.auth.token'); } catch {}
+      window.location.href = "/";
+    } catch (e: any) {
+      console.error("Unexpected sign out error:", e);
+      toast({ title: "Sign out failed", description: e?.message || String(e), variant: "destructive" });
+    }
+  };
+
   return (
     <header className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-10">
       <div className="container mx-auto px-4 py-4 flex items-center justify-between">
@@ -31,7 +51,7 @@ const Header = () => {
           </Link>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="outline" onClick={() => supabase.auth.signOut()}>
+          <Button variant="outline" onClick={handleSignOut}>
             Sign Out
           </Button>
         </div>
