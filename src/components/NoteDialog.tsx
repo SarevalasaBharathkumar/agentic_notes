@@ -90,6 +90,8 @@ export const NoteDialog: React.FC<NoteDialogProps> = ({ note, open, onOpenChange
           } else if (userId) {
             await offline.deleteLocalNote(note.id);
             await offline.queueDelete(note.id, userId);
+            // notify page to perform aggressive fetches
+            try { window.dispatchEvent(new Event('local-change')); } catch {}
           }
           onUpdateNote?.(null);
         }
@@ -108,6 +110,7 @@ export const NoteDialog: React.FC<NoteDialogProps> = ({ note, open, onOpenChange
           const localNote = { id: note.id, user_id: userId, ...updateData } as Note;
           await offline.putLocalNote(localNote as any);
           await offline.queueUpsert(localNote as any);
+          try { window.dispatchEvent(new Event('local-change')); } catch {}
           onUpdateNote?.(localNote);
         }
       } else {
@@ -137,6 +140,7 @@ export const NoteDialog: React.FC<NoteDialogProps> = ({ note, open, onOpenChange
           const localNote = { id, user_id: effectiveUserId, ...updateData } as Note;
           await offline.putLocalNote(localNote as any);
           await offline.queueUpsert(localNote as any);
+          try { window.dispatchEvent(new Event('local-change')); } catch {}
           onUpdateNote?.(localNote);
         }
       }

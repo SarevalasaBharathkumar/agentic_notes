@@ -141,10 +141,37 @@ export async function syncPending(user_id?: string) {
 }
 
 export async function mergeRemoteIntoLocal(remote: NoteLike[]) {
-  // Last-write-wins by updated_at
+  // Replace local notes for the user with the remote set (merge semantics):
+  // - Upsert all remote notes
+  // - Remove any local notes for the same user that are not present remotely
+  // This prevents deleted remote notes from being resurrected locally.
+  if (!remote || remote.length === 0) {
+    return
+  }
   const db = await getDB()
   const tx = db.transaction('notes', 'readwrite')
+  // Upsert remote notes
   for (const n of remote) await tx.store.put(n)
+
+  // Determine user id from remote payload (assume all belong to same user)
+  const userId = (remote[0] && (remote[0] as any).user_id) as string | undefined
+  if (userId) {
+    try {
+      const idx = (tx.objectStore('notes') as any).index('user_id')
+      const localKeys = await idx.getAllKeys(IDBKeyRange.only(userId))
+      const remoteIds = new Set(remote.map(r => r.id))
+      for (const key of localKeys) {
+        // key corresponds to note.id because object store keyPath is 'id'
+        if (!remoteIds.has(key as string)) {
+          await tx.objectStore('notes').delete(key as any)
+        }
+      }
+    } catch (e) {
+      // If index access fails for any reason, ignore and keep local notes as-is
+      console.warn('mergeRemoteIntoLocal: cleanup failed', e)
+    }
+  }
+
   await tx.done
 }
 
@@ -228,6 +255,16 @@ export async function getLastFetchedAt(user_id: string): Promise<number | undefi
   return getMeta<number>(key)
 }
 
+export async function setLastFullSync(user_id: string, ts: number = Date.now()) {
+  const key = `lastFullSync:${user_id}`
+  await setMeta(key, ts)
+}
+
+export async function getLastFullSync(user_id: string): Promise<number | undefined> {
+  const key = `lastFullSync:${user_id}`
+  return getMeta<number>(key)
+}
+
 export function nowISO() {
   return new Date().toISOString()
 }
@@ -264,6 +301,8 @@ export const offline = {
   queueDelete,
   syncPending,
   mergeRemoteIntoLocal,
+  setLastFullSync,
+  getLastFullSync,
   removePendingForNote,
   getPendingDeletes,
   getPendingCount,

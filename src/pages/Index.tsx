@@ -45,6 +45,11 @@ const Index = () => {
   const [deletingAll, setDeletingAll] = useState(false);
   const [fallbackUserId, setFallbackUserId] = useState<string | undefined>();
   const [online, setOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [pendingCount, setPendingCount] = useState<number>(0);
+  // refs for aggressive polling timeouts
+  const aggressiveTimeoutsRef = useRef<number[] | null>(null);
+  const fetchRemoteAndMergeRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -74,6 +79,7 @@ const Index = () => {
   }, []);
   const { toast } = useToast();
   const MIN_FETCH_INTERVAL_MS = 60_000; // 1 minute cooldown for remote fetches
+  const FULL_SYNC_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours - perform a full sync at least once per day
   
   // Track if we pushed a history entry for dialogs
   const pushedChatRef = useRef(false);
@@ -141,6 +147,9 @@ const Index = () => {
         } as Note;
         await offline.putLocalNote(local as any);
         await offline.queueUpsert(local as any);
+        // bump aggressive polling and update pending count
+        bumpAggressive();
+        try { setPendingCount(await offline.getPendingCount(session.user.id)); } catch {}
         setNotes((prev) => [local, ...prev]);
       }
       toast({ title: "Note saved", description: `Added "${note.title}" from assistant.` });
@@ -148,6 +157,20 @@ const Index = () => {
       console.error("Error creating note from chat:", e);
       toast({ title: "Error", description: "Failed to save note.", variant: "destructive" });
     }
+  };
+
+  // Trigger a few short, aggressive fetches after a local change to speed convergence
+  const bumpAggressive = () => {
+    // clear previous scheduled aggressive fetches
+    if (aggressiveTimeoutsRef.current) {
+      for (const id of aggressiveTimeoutsRef.current) clearTimeout(id);
+    }
+    // immediate fetch
+    fetchRemoteAndMergeRef.current?.().catch(() => {});
+    // schedule two more near-term fetches
+    const t1 = window.setTimeout(() => fetchRemoteAndMergeRef.current?.().catch(() => {}), 5000);
+    const t2 = window.setTimeout(() => fetchRemoteAndMergeRef.current?.().catch(() => {}), 10000);
+    aggressiveTimeoutsRef.current = [t1, t2];
   };
 
   useEffect(() => {
@@ -209,29 +232,83 @@ const Index = () => {
       };
 
       const fetchRemoteAndMerge = async () => {
-        const { data, error } = await supabase
-          .from("notes")
-          .select("*")
-          .eq("user_id", userId)
-          .order("updated_at", { ascending: false });
-        if (!error && data) {
-          // Avoid resurrecting locally-deleted notes that are queued for deletion
-          const pendingDeletes = await offline.getPendingDeletes(userId);
-          const filtered = (data as any).filter((n: any) => !pendingDeletes.includes(n.id));
-          await offline.mergeRemoteIntoLocal(filtered as any);
-          const local = await offline.getLocalNotes(userId);
-          setNotes(local as any);
-          // remote refresh complete, clear dirty flag if there are no pending ops
-          const res = await offline.isDirty();
-          if (res) {
-            const synced = await offline.getPendingDeletes(userId); // quick check: only deletes count here
-            // If no more pending ops (crude), clear dirty
-            if (synced.length === 0) await offline.setDirty(false);
+        // Decide between delta fetch and full sync
+        try {
+          const lastFull = await offline.getLastFullSync(userId);
+          const lastFetched = await offline.getLastFetchedAt(userId);
+          const now = Date.now();
+
+          const doFull = !lastFull || (now - lastFull) > FULL_SYNC_THRESHOLD_MS || !lastFetched;
+
+          // Helper to filter out any remote notes that we have pending deletes for
+          const filterPendingDeletes = async (rows: any[]) => {
+            const pendingDeletes = await offline.getPendingDeletes(userId);
+            return (rows || []).filter((n: any) => !pendingDeletes.includes(n.id));
+          };
+
+          if (doFull) {
+            // Full fetch: get entire remote set and reconcile (this allows detecting deletions)
+            const { data, error } = await supabase
+              .from("notes")
+              .select("*")
+              .eq("user_id", userId)
+              .order("updated_at", { ascending: false });
+            if (!error && data) {
+              const filtered = await filterPendingDeletes(data as any);
+              await offline.mergeRemoteIntoLocal(filtered as any);
+              const local = await offline.getLocalNotes(userId);
+              setNotes(local as any);
+              await offline.setLastFullSync(userId);
+              await offline.setLastFetchedAt(userId);
+            }
+          } else {
+            // Delta fetch: get notes updated since lastFetched
+            const iso = new Date(lastFetched!).toISOString();
+            const { data, error } = await supabase
+              .from("notes")
+              .select("*")
+              .eq("user_id", userId)
+              .gt("updated_at", iso)
+              .order("updated_at", { ascending: false });
+            if (!error && data && (data as any).length > 0) {
+              const filtered = await filterPendingDeletes(data as any);
+              // For deltas we only upsert changed records; don't remove local notes here
+              await offline.putManyLocalNotes(filtered as any);
+              const local = await offline.getLocalNotes(userId);
+              setNotes(local as any);
+              await offline.setLastFetchedAt(userId);
+            } else if (error) {
+              // Delta failed; fall back to full fetch to be safe
+              console.warn('Delta fetch failed, falling back to full sync', error);
+              const { data: fullData, error: fullErr } = await supabase
+                .from("notes")
+                .select("*")
+                .eq("user_id", userId)
+                .order("updated_at", { ascending: false });
+              if (!fullErr && fullData) {
+                const filtered = await filterPendingDeletes(fullData as any);
+                await offline.mergeRemoteIntoLocal(filtered as any);
+                const local = await offline.getLocalNotes(userId);
+                setNotes(local as any);
+                await offline.setLastFullSync(userId);
+                await offline.setLastFetchedAt(userId);
+              }
+            }
           }
-          // mark last fetch time
-          await offline.setLastFetchedAt(userId);
+
+          // After any successful fetch, update UI counters and dirty flag
+          try { setPendingCount(await offline.getPendingCount(userId)); } catch {}
+          const dirty = await offline.isDirty();
+          if (!dirty) {
+            await offline.setDirty(false);
+          }
+          setLastSyncAt(Date.now());
+        } catch (e) {
+          console.warn('fetchRemoteAndMerge error', e);
         }
       };
+      // expose fetchRemoteAndMerge to outer scope for aggressive polling
+      fetchRemoteAndMergeRef.current = fetchRemoteAndMerge;
 
       const shouldFetch = async (localLen: number) => {
         if (!navigator.onLine || !isAuthed) return false;
@@ -248,6 +325,7 @@ const Index = () => {
 
       // Always show whatever we have locally first
       hydrateFromLocal().then(async (local) => {
+        try { setPendingCount(await offline.getPendingCount(userId)); } catch {}
         // If authenticated, try to sync + conditionally fetch remote when online
         if (isAuthed && navigator.onLine) {
           const res = await offline.syncPending(userId);
@@ -288,22 +366,33 @@ const Index = () => {
         }
       };
       window.addEventListener('online', onOnline);
+      const onLocalChange = async () => {
+        bumpAggressive();
+        try { setPendingCount(await offline.getPendingCount(userId)); } catch {}
+      };
+      window.addEventListener('local-change', onLocalChange as EventListener);
 
       // Subscribe to realtime changes
       const subscription = isAuthed ? supabase
-        .channel("notes_channel")
+        .channel(`notes_channel_${userId}`, { config: { broadcast: { self: true } } })
         .on(
           "postgres_changes",
           {
             event: "DELETE",
             schema: "public",
             table: "notes",
-            filter: `user_id=eq.${session!.user!.id}`,
+            filter: `user_id=eq.${userId}`,
           },
           async (payload) => {
-            // Remove the deleted note from state and local db
-            setNotes(currentNotes => currentNotes.filter(note => note.id !== payload.old.id));
-            await offline.deleteLocalNote((payload.old as any).id);
+            console.log("[Realtime] DELETE event received for note:", payload.old.id);
+            // Use the same sync pattern as INSERT: fetch and merge all remote notes
+            // This ensures the deleted note is removed and state is consistent
+            await fetchRemoteAndMerge();
+            toast({
+              title: "Note deleted",
+              description: "A note was deleted on another device.",
+              duration: 3000,
+            });
           }
         )
         .on(
@@ -312,9 +401,10 @@ const Index = () => {
             event: "INSERT",
             schema: "public",
             table: "notes",
-            filter: `user_id=eq.${session!.user!.id}`,
+            filter: `user_id=eq.${userId}`,
           },
           async () => {
+            console.log("[Realtime] INSERT event received");
             // Refetch and merge
             await fetchRemoteAndMerge();
           }
@@ -325,20 +415,51 @@ const Index = () => {
             event: "UPDATE",
             schema: "public",
             table: "notes",
-            filter: `user_id=eq.${session!.user!.id}`,
+            filter: `user_id=eq.${userId}`,
           },
           async (payload) => {
+            console.log("[Realtime] UPDATE event received for note:", payload.new.id);
             // Update/merge then hydrate from local
             await offline.putLocalNote(payload.new as any);
             const local = await offline.getLocalNotes(userId);
             setNotes(local as any);
           }
         )
-        .subscribe() : { unsubscribe: () => {} } as any;
+        .on("system", {}, (message) => {
+          console.log("[Realtime] System message:", message);
+        })
+        .subscribe((status, err) => {
+          console.log("[Realtime] Subscription status:", status, err);
+          if (err) {
+            console.error("[Realtime] Subscription error:", err);
+            toast({
+              title: "Realtime sync error",
+              description: "Failed to connect for live updates. Will sync manually.",
+              variant: "destructive",
+              duration: 5000,
+            });
+          }
+        }) : { unsubscribe: () => {} } as any;
+
+      // Fallback polling: if realtime isn't reliably delivering deletes, poll
+      // the server periodically to ensure eventual consistency. This is a
+      // conservative short-interval poll while the app is active; adjust as needed.
+      const POLL_INTERVAL_MS = 15000; // 15s
+      let pollId: number | null = null;
+      if (isAuthed) {
+        pollId = window.setInterval(() => {
+          if (navigator.onLine) {
+            fetchRemoteAndMerge().catch((e) => console.warn('[Poll] fetchRemoteAndMerge failed', e));
+          }
+        }, POLL_INTERVAL_MS);
+      }
 
       return () => {
+        console.log("[Realtime] Unsubscribing from notes channel");
         subscription.unsubscribe();
+        if (pollId) clearInterval(pollId);
         window.removeEventListener('online', onOnline);
+        window.removeEventListener('local-change', onLocalChange as EventListener);
       };
     }
   }, [session, fallbackUserId]);
