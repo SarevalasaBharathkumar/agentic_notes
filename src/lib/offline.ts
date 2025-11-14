@@ -101,9 +101,13 @@ export async function syncPending(user_id?: string) {
   const db = await getDB()
   const tx = db.transaction('pending', 'readwrite')
   const pending = await tx.store.getAll() as PendingOp[]
+  const keys = await tx.store.getAllKeys() as (number | string | undefined)[]
+  // Pair ops with their keys so we can delete the exact entry after success
+  const paired = pending.map((op, i) => ({ op, key: keys[i] }))
   let count = 0
-  for (const op of pending.sort((a, b) => (a.ts || 0) - (b.ts || 0))) {
+  for (const pair of paired.sort((a, b) => (a.op.ts || 0) - (b.op.ts || 0))) {
     try {
+      const op = pair.op
       if (op.kind === 'upsert') {
         if (user_id && op.note.user_id !== user_id) continue
         const { error } = await supabase.from('notes').upsert(op.note)
@@ -114,7 +118,7 @@ export async function syncPending(user_id?: string) {
         if (error) throw error
       }
       // Remove op once succeeded
-      if (typeof (op as any).id !== 'undefined') await tx.store.delete((op as any).id)
+      if (typeof pair.key !== 'undefined') await tx.store.delete(pair.key as any)
       count++
     } catch {
       // stop early; will retry later

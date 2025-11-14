@@ -265,15 +265,10 @@ const Index = () => {
           const t = toast({ title: "Reconnected", description: "Syncing changes…" });
           try {
             const res = await offline.syncPending(userId);
-            const localLen = (await offline.getLocalNotes(userId)).length;
-            const needByPolicy = await shouldFetch(localLen);
-            // Only fetch if we actually synced changes OR policy says it's time
-            if ((res?.synced && res.synced > 0) || needByPolicy) {
-              await fetchRemoteAndMerge();
-            } else {
-              t.dismiss();
-              return;
-            }
+            // After syncing pending ops, always refresh remote state so we
+            // pick up deletes/changes that happened while this client was offline.
+            // This ensures devices converge even if they had no local pending ops.
+            await fetchRemoteAndMerge();
             if (res?.synced && res.synced > 0) {
               t.update({ id: t.id, title: "Synced", description: `Pushed ${res.synced} change${res.synced === 1 ? '' : 's'} to cloud.` });
             } else {

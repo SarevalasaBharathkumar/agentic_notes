@@ -161,3 +161,44 @@ All colors MUST be HSL.
 .prose th, .prose td { border: 1px solid hsl(var(--border)); padding: 0.25rem 0.5rem; vertical-align: top; }
 .prose th { background-color: hsl(var(--muted)); font-weight: 600; }
 .prose a { text-decoration: underline; }
+
+/* Android native layout adjustments
+   Only applied when the app runs inside Capacitor on Android.
+   We add the `android-native` class to <html> and <body> from JS.
+   Goals:
+   - Do NOT shift the whole app down (undo previous 10em body shift)
+   - Make the navbar/header have a solid (opaque) background that begins at
+     the top of the screen (under the status bar/cutout) like WhatsApp
+   - Ensure header content is padded below the status bar using safe-area insets
+*/
+
+/* Remove any global app shift for Android builds; layout should start at the top */
+body.android-native {
+  padding-top: 0;
+}
+
+/* Make the header background opaque and extend into the status-bar area.
+   Use the safe-area inset so content (icons/title) sits below the status bar
+   while the header's background fills the area behind system icons. */
+body.android-native header,
+html.android-native header {
+  background-color: hsl(var(--card)) !important; /* opaque card color */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  /* Keep header positioned at the very top */
+  top: 0 !important;
+  /* Let the header visually extend into the status bar. Use a smaller
+     fallback (6px) so the header is compact on Android devices where
+     safe-area insets may be large. */
+  padding-top: env(safe-area-inset-top, 6px) !important;
+  padding-bottom: 0.25rem !important;
+}
+
+/* Ensure the inner container's content is pushed down beneath the status bar
+   so text and buttons don't collide with system icons */
+body.android-native header .container {
+  /* Reduce the container's vertical padding to override Tailwind's `py-4`.
+     Keep horizontal padding intact. */
+  padding-top: calc(env(safe-area-inset-top, 6px) + 0rem) !important;
+  padding-bottom: 0.125rem !important;
+}
